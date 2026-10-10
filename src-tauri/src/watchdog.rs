@@ -1,7 +1,10 @@
 use crate::state::SecurityManager;
 use std::sync::Arc;
+use tauri::AppHandle;
+#[cfg(target_os = "macos")]
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, Manager};
+#[cfg(target_os = "macos")]
+use tauri::{Emitter, Manager};
 
 #[cfg(target_os = "macos")]
 pub fn start_focus_watchdog(app_handle: AppHandle, security: Arc<SecurityManager>) {

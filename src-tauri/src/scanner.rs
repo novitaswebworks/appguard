@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "macos")]
 use std::fs;
+#[cfg(target_os = "macos")]
 use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,6 +128,7 @@ fn get_icon_png_base64(bundle_id: &str, icns_path: &str) -> Option<String> {
     None
 }
 
+#[cfg(target_os = "macos")]
 fn extract_plist_tag(plist: &str, tag: &str) -> Option<String> {
     let search = format!("<key>{}</key>", tag);
     let key_pos = plist.find(&search)?;
