@@ -7,6 +7,7 @@ pub struct ScannedApp {
     pub name: String,
     pub bundle_id: String,
     pub path: String,
+    pub icon_path: Option<String>,
 }
 
 pub fn scan_installed_applications() -> Vec<ScannedApp> {
@@ -58,10 +59,26 @@ fn parse_macos_app(path: &Path) -> Option<ScannedApp> {
                 .to_string()
         });
 
+    let icon_file = extract_plist_tag(&plist_str, "CFBundleIconFile");
+    let icon_path = icon_file.and_then(|file_name| {
+        let name_with_ext = if file_name.ends_with(".icns") {
+            file_name
+        } else {
+            format!("{file_name}.icns")
+        };
+        let resources_path = path.join("Contents").join("Resources").join(name_with_ext);
+        if resources_path.exists() {
+            Some(resources_path.to_string_lossy().to_string())
+        } else {
+            None
+        }
+    });
+
     Some(ScannedApp {
         name,
         bundle_id,
         path: path.to_string_lossy().to_string(),
+        icon_path,
     })
 }
 

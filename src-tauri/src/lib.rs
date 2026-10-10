@@ -7,7 +7,7 @@ use auth::BiometricStatus;
 use scanner::ScannedApp;
 use state::{AppGuardConfig, AppRule, SecurityManager};
 use std::sync::Arc;
-use tauri::State;
+use tauri::{Manager, State};
 
 // ----------------- IPC Tauri Commands -----------------
 
@@ -69,18 +69,53 @@ fn get_installed_apps() -> Vec<ScannedApp> {
     scanner::scan_installed_applications()
 }
 
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::TrayIconBuilder;
+
 // ----------------- App Initialization -----------------
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let security_manager = Arc::new(SecurityManager::new());
     let watchdog_security = security_manager.clone();
+    let tray_security = security_manager.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(security_manager)
         .setup(move |app| {
             let handle = app.handle().clone();
+
+            // Build system tray menu
+            let show_i = MenuItem::with_id(app, "show", "Open AppGuard", true, None::<&str>)?;
+            let lock_i = MenuItem::with_id(app, "lock_all", "🔒 Lock All Now", true, None::<&str>)?;
+            let quit_i = MenuItem::with_id(app, "quit", "Quit AppGuard", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show_i, &lock_i, &quit_i])?;
+
+            let tray_handle = handle.clone();
+            let _tray = TrayIconBuilder::new()
+                .menu(&menu)
+                .tooltip("AppGuard — Biometric Privacy Shield")
+                .on_menu_event(move |_app, event| {
+                    match event.id.as_ref() {
+                        "show" => {
+                            if let Some(w) = tray_handle.get_webview_window("main") {
+                                let _ = w.show();
+                                let _ = w.unminimize();
+                                let _ = w.set_focus();
+                            }
+                        }
+                        "lock_all" => {
+                            tray_security.lock_all();
+                        }
+                        "quit" => {
+                            std::process::exit(0);
+                        }
+                        _ => {}
+                    }
+                })
+                .build(app)?;
+
             // Start the background frontmost application watchdog
             watchdog::start_focus_watchdog(handle, watchdog_security);
             Ok(())
@@ -97,6 +132,13 @@ pub fn run() {
             lock_all_sessions,
             get_installed_apps,
         ])
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // Prevent application exit on window close, minimize to tray
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running AppGuard application");
 }

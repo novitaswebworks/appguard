@@ -30,6 +30,7 @@ interface ScannedApp {
   name: string;
   bundle_id: string;
   path: string;
+  icon_path?: string;
 }
 
 interface AppRule {
@@ -536,28 +537,35 @@ export default function App() {
                   <Sun className="w-4 h-4 text-amber-500" />
                   <span>Light Themes (Clean & Ergonomic)</span>
                 </div>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {(["nordic", "editorial"] as ThemeMode[]).map((mode) => {
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {(["nordic", "editorial", "rose", "emerald", "amber"] as ThemeMode[]).map((mode) => {
                     const item = THEMES[mode];
                     const selected = currentTheme === mode;
+                    const subtitles: Record<string, string> = {
+                      nordic: "Crisp white with electric sapphire",
+                      editorial: "Warm parchment with organic teal",
+                      rose: "Blush quartz with vivid rose",
+                      emerald: "Clean jade with mint highlights",
+                      amber: "Warm sunlight with golden amber",
+                    };
                     return (
                       <div
                         key={mode}
                         onClick={() => setCurrentTheme(mode)}
-                        className="p-5 rounded-2xl border-2 cursor-pointer transition-all hover:scale-[1.01] flex flex-col justify-between"
+                        className="p-4 rounded-2xl border-2 cursor-pointer transition-all hover:scale-[1.01] flex flex-col justify-between"
                         style={{
                           backgroundColor: item.colors.bgCard,
                           borderColor: selected ? item.colors.accent : item.colors.border,
                           boxShadow: selected ? `0 8px 24px ${item.colors.accentGlow}` : "none",
                         }}
                       >
-                        <div className="flex items-center justify-between mb-4">
+                        <div className="flex items-center justify-between mb-3">
                           <div>
                             <h4 className="font-bold text-sm" style={{ color: item.colors.textPrimary }}>
                               {item.name}
                             </h4>
                             <p className="text-xs" style={{ color: item.colors.textSecondary }}>
-                              {mode === "nordic" ? "Crisp white with electric sapphire" : "Warm parchment with organic teal"}
+                              {subtitles[mode]}
                             </p>
                           </div>
                           {selected && (
@@ -575,7 +583,7 @@ export default function App() {
                           <span className="w-5 h-5 rounded-full border shadow-xs" style={{ backgroundColor: item.previewBg }} />
                           <span className="w-5 h-5 rounded-full shadow-xs" style={{ backgroundColor: item.previewAccent }} />
                           <span className="text-[11px] font-mono ml-auto" style={{ color: item.colors.textMuted }}>
-                            {mode === "nordic" ? "#f8fafc" : "#faf9f6"}
+                            {item.previewBg}
                           </span>
                         </div>
                       </div>
