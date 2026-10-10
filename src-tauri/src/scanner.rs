@@ -8,6 +8,7 @@ pub struct ScannedApp {
     pub bundle_id: String,
     pub path: String,
     pub icon_path: Option<String>,
+    pub icon_base64: Option<String>,
 }
 
 pub fn scan_installed_applications() -> Vec<ScannedApp> {
@@ -74,12 +75,55 @@ fn parse_macos_app(path: &Path) -> Option<ScannedApp> {
         }
     });
 
+    let icon_base64 = icon_path.as_ref().and_then(|p| get_icon_png_base64(&bundle_id, p));
+
     Some(ScannedApp {
         name,
         bundle_id,
         path: path.to_string_lossy().to_string(),
         icon_path,
+        icon_base64,
     })
+}
+
+#[cfg(target_os = "macos")]
+fn get_icon_png_base64(bundle_id: &str, icns_path: &str) -> Option<String> {
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use base64::Engine;
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    let home = std::env::var("HOME").ok().or_else(|| std::env::var("USERPROFILE").ok())?;
+    let cache_dir = PathBuf::from(home).join(".cache").join("appguard").join("icons");
+    let _ = fs::create_dir_all(&cache_dir);
+    let safe_id = bundle_id.replace(|c: char| !c.is_alphanumeric() && c != '.', "_");
+    let cached_png = cache_dir.join(format!("{safe_id}.png"));
+
+    if cached_png.exists() {
+        if let Ok(bytes) = fs::read(&cached_png) {
+            return Some(format!("data:image/png;base64,{}", BASE64.encode(&bytes)));
+        }
+    }
+
+    let output = Command::new("/usr/bin/sips")
+        .args([
+            "-s", "format", "png",
+            "-z", "64", "64",
+            icns_path,
+            "--out",
+        ])
+        .arg(&cached_png)
+        .output();
+
+    if let Ok(res) = output {
+        if res.status.success() && cached_png.exists() {
+            if let Ok(bytes) = fs::read(&cached_png) {
+                return Some(format!("data:image/png;base64,{}", BASE64.encode(&bytes)));
+            }
+        }
+    }
+
+    None
 }
 
 fn extract_plist_tag(plist: &str, tag: &str) -> Option<String> {

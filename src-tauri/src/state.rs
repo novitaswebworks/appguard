@@ -138,6 +138,22 @@ impl SecurityManager {
         self.active_unlocked.write().insert(bundle_id.to_string());
     }
 
+    pub fn add_vault_folder(&self, path: String) -> Result<(), String> {
+        let mut cfg = self.config.write();
+        if !cfg.locked_folders.contains(&path) {
+            cfg.locked_folders.push(path);
+        }
+        drop(cfg);
+        self.save()
+    }
+
+    pub fn remove_vault_folder(&self, path: &str) -> Result<(), String> {
+        let mut cfg = self.config.write();
+        cfg.locked_folders.retain(|f| f != path);
+        drop(cfg);
+        self.save()
+    }
+
     pub fn lock_all(&self) {
         self.unlocked_at.write().clear();
         self.active_unlocked.write().clear();

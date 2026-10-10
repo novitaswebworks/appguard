@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
+import { isEnabled, enable, disable } from "@tauri-apps/plugin-autostart";
 import {
   Shield,
   ShieldAlert,
@@ -17,6 +19,10 @@ import {
   Sun,
   Moon,
   Check,
+  FolderPlus,
+  Trash2,
+  HardDrive,
+  Power,
 } from "lucide-react";
 import { THEMES, ThemeMode } from "./theme";
 
@@ -26,11 +32,20 @@ interface BiometricStatus {
   error_message?: string;
 }
 
+interface VaultItem {
+  path: string;
+  name: string;
+  is_locked: boolean;
+  file_count: number;
+  total_size_bytes: number;
+}
+
 interface ScannedApp {
   name: string;
   bundle_id: string;
   path: string;
   icon_path?: string;
+  icon_base64?: string;
 }
 
 interface AppRule {
@@ -77,6 +92,14 @@ export default function App() {
   const [confirmPin, setConfirmPin] = useState("");
   const [pinSetupError, setPinSetupError] = useState("");
 
+  // Folder Vaults state
+  const [vaults, setVaults] = useState<VaultItem[]>([]);
+  const [loadingVaults, setLoadingVaults] = useState(false);
+  const [vaultActionLoading, setVaultActionLoading] = useState<string | null>(null);
+
+  // Autostart toggle state
+  const [autostartEnabled, setAutostartEnabled] = useState(false);
+
   useEffect(() => {
     localStorage.setItem("appguard_theme", currentTheme);
     document.body.style.backgroundColor = theme.colors.bgApp;
@@ -113,8 +136,91 @@ export default function App() {
       setConfig(cfg);
 
       loadInstalledApps();
+      loadVaults();
+
+      try {
+        const auto = await isEnabled();
+        setAutostartEnabled(auto);
+      } catch (err) {
+        console.warn("Autostart check failed:", err);
+      }
     } catch (e) {
       console.error("Failed to initialize AppGuard:", e);
+    }
+  }
+
+  async function loadVaults() {
+    setLoadingVaults(true);
+    try {
+      const items = await invoke<VaultItem[]>("inspect_folder_vaults");
+      setVaults(items);
+    } catch (e) {
+      console.error("Failed to load vaults:", e);
+    } finally {
+      setLoadingVaults(false);
+    }
+  }
+
+  async function handleToggleAutostart() {
+    try {
+      if (autostartEnabled) {
+        await disable();
+        setAutostartEnabled(false);
+      } else {
+        await enable();
+        setAutostartEnabled(true);
+      }
+    } catch (e) {
+      console.error("Error toggling autostart:", e);
+    }
+  }
+
+  async function handleSelectFolder() {
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: "Select Directory to Protect",
+      });
+      if (selected && typeof selected === "string") {
+        await invoke("add_folder_to_vault", { folderPath: selected });
+        loadVaults();
+      }
+    } catch (e) {
+      console.error("Folder selection failed:", e);
+    }
+  }
+
+  async function handleRemoveVault(folderPath: string) {
+    try {
+      await invoke("remove_folder_from_vault", { folderPath });
+      loadVaults();
+    } catch (e) {
+      console.error("Failed to remove vault folder:", e);
+    }
+  }
+
+  async function handleToggleVaultLock(item: VaultItem) {
+    if (!hasPin) {
+      setShowPinSetup(true);
+      return;
+    }
+
+    const pin = prompt(`Enter Master Recovery PIN to ${item.is_locked ? "decrypt" : "encrypt"} "${item.name}":`);
+    if (!pin) return;
+
+    setVaultActionLoading(item.path);
+    try {
+      if (item.is_locked) {
+        await invoke("decrypt_vault_folder", { folderPath: item.path, pin });
+      } else {
+        await invoke("encrypt_vault_folder", { folderPath: item.path, pin });
+      }
+      loadVaults();
+    } catch (e: any) {
+      alert(`Vault operation failed: ${e}`);
+    } finally {
+      setVaultActionLoading(null);
     }
   }
 
@@ -449,19 +555,43 @@ export default function App() {
                     }}
                   >
                     <div className="flex items-center gap-3 min-w-0 pr-3">
-                      <div
-                        className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 transition-colors"
-                        style={{
-                          backgroundColor: isLocked ? theme.colors.badgeBg : (isLight ? "#f1f5f9" : "#1e293b"),
-                          color: isLocked ? theme.colors.accent : theme.colors.textMuted,
-                        }}
-                      >
-                        {isLocked ? <Lock className="w-5 h-5" /> : <Unlock className="w-5 h-5" />}
-                      </div>
+                      {app.icon_base64 ? (
+                        <div className="w-10 h-10 rounded-xl overflow-hidden flex-shrink-0 bg-transparent flex items-center justify-center shadow-xs">
+                          <img
+                            src={app.icon_base64}
+                            alt={app.name}
+                            className="w-full h-full object-contain pointer-events-none select-none"
+                            loading="lazy"
+                          />
+                        </div>
+                      ) : (
+                        <div
+                          className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 transition-colors"
+                          style={{
+                            backgroundColor: isLocked ? theme.colors.badgeBg : (isLight ? "#f1f5f9" : "#1e293b"),
+                            color: isLocked ? theme.colors.accent : theme.colors.textMuted,
+                          }}
+                        >
+                          {isLocked ? <Lock className="w-5 h-5" /> : <Unlock className="w-5 h-5" />}
+                        </div>
+                      )}
                       <div className="min-w-0">
-                        <h4 className="text-sm font-semibold truncate" style={{ color: theme.colors.textPrimary }}>
-                          {app.name}
-                        </h4>
+                        <div className="flex items-center gap-1.5">
+                          <h4 className="text-sm font-semibold truncate" style={{ color: theme.colors.textPrimary }}>
+                            {app.name}
+                          </h4>
+                          {isLocked && (
+                            <span
+                              className="text-[10px] px-1.5 py-0.5 rounded-full font-medium"
+                              style={{
+                                backgroundColor: theme.colors.badgeBg,
+                                color: theme.colors.badgeText,
+                              }}
+                            >
+                              Locked
+                            </span>
+                          )}
+                        </div>
                         <p className="text-xs truncate" style={{ color: theme.colors.textMuted }} title={app.bundle_id}>
                           {app.bundle_id}
                         </p>
@@ -489,33 +619,147 @@ export default function App() {
 
           {/* TAB 2: VAULT */}
           {activeTab === "vault" && (
-            <div className="h-full flex flex-col items-center justify-center text-center max-w-md mx-auto">
-              <div
-                className="w-16 h-16 rounded-2xl border flex items-center justify-center mb-4 shadow-xl"
-                style={{
-                  backgroundColor: theme.colors.badgeBg,
-                  borderColor: theme.colors.borderLocked,
-                  color: theme.colors.accent,
-                }}
-              >
-                <FolderLock className="w-8 h-8" />
+            <div className="space-y-6 max-w-4xl">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-base font-bold" style={{ color: theme.colors.textPrimary }}>
+                    Encrypted Folder Vaults
+                  </h3>
+                  <p className="text-xs" style={{ color: theme.colors.textSecondary }}>
+                    Folders secured with zero-knowledge AES-256-GCM encryption. Locked folders cannot be viewed without your Master PIN.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={loadVaults}
+                    disabled={loadingVaults}
+                    title="Refresh vaults"
+                    className="p-2 rounded-xl border hover:opacity-80 transition-opacity cursor-pointer"
+                    style={{ borderColor: theme.colors.border, color: theme.colors.textMuted }}
+                  >
+                    <RefreshCw className={`w-4 h-4 ${loadingVaults ? "animate-spin" : ""}`} />
+                  </button>
+                  <button
+                    onClick={handleSelectFolder}
+                    className="px-4 py-2 rounded-xl font-semibold text-xs flex items-center gap-2 shadow-md cursor-pointer hover:opacity-90 transition-all text-white"
+                    style={{
+                      backgroundColor: theme.colors.accent,
+                      boxShadow: `0 4px 12px ${theme.colors.accentGlow}`,
+                    }}
+                  >
+                    <FolderPlus className="w-4 h-4" />
+                    <span>Protect New Folder</span>
+                  </button>
+                </div>
               </div>
-              <h3 className="text-lg font-bold mb-2" style={{ color: theme.colors.textPrimary }}>
-                Encrypted Folder Vaults
-              </h3>
-              <p className="text-sm mb-6" style={{ color: theme.colors.textSecondary }}>
-                Protect sensitive personal directories (Taxes, Financials, Journals) with zero-knowledge AES-256-GCM encryption.
-              </p>
-              <button
-                className="px-5 py-2.5 rounded-xl font-semibold text-sm hover:opacity-90 shadow-lg transition-all cursor-pointer"
-                style={{
-                  backgroundColor: theme.colors.accent,
-                  color: theme.colors.accentText,
-                  boxShadow: `0 8px 16px ${theme.colors.accentGlow}`,
-                }}
-              >
-                + Create New Vault
-              </button>
+
+              {vaults.length === 0 ? (
+                <div
+                  className="p-12 rounded-2xl border-2 border-dashed flex flex-col items-center justify-center text-center space-y-3"
+                  style={{ borderColor: theme.colors.border }}
+                >
+                  <div
+                    className="w-14 h-14 rounded-2xl flex items-center justify-center shadow-md"
+                    style={{ backgroundColor: theme.colors.badgeBg, color: theme.colors.accent }}
+                  >
+                    <FolderLock className="w-7 h-7" />
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-bold" style={{ color: theme.colors.textPrimary }}>
+                      No Protected Folders Yet
+                    </h4>
+                    <p className="text-xs max-w-sm mt-1" style={{ color: theme.colors.textMuted }}>
+                      Click "Protect New Folder" to select any directory on your Mac (such as Documents, Financials, or Taxes) and encrypt it.
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {vaults.map((vault) => {
+                    const isProcessing = vaultActionLoading === vault.path;
+                    const formatSize = (bytes: number) => {
+                      if (bytes === 0) return "0 B";
+                      const k = 1024;
+                      const sizes = ["B", "KB", "MB", "GB"];
+                      const i = Math.floor(Math.log(bytes) / Math.log(k));
+                      return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
+                    };
+
+                    return (
+                      <div
+                        key={vault.path}
+                        className="p-5 rounded-2xl border transition-all flex flex-col justify-between space-y-4 shadow-xs"
+                        style={{
+                          backgroundColor: vault.is_locked ? theme.colors.bgCardLocked : theme.colors.bgCard,
+                          borderColor: vault.is_locked ? theme.colors.borderLocked : theme.colors.borderCard,
+                        }}
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="flex items-center gap-3 min-w-0">
+                            <div
+                              className="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0"
+                              style={{
+                                backgroundColor: vault.is_locked ? theme.colors.badgeBg : (isLight ? "#f1f5f9" : "#1e293b"),
+                                color: vault.is_locked ? theme.colors.accent : theme.colors.textMuted,
+                              }}
+                            >
+                              {vault.is_locked ? <FolderLock className="w-6 h-6" /> : <HardDrive className="w-6 h-6" />}
+                            </div>
+                            <div className="min-w-0">
+                              <h4 className="font-semibold text-sm truncate" style={{ color: theme.colors.textPrimary }}>
+                                {vault.name}
+                              </h4>
+                              <p className="text-[11px] truncate font-mono" style={{ color: theme.colors.textMuted }} title={vault.path}>
+                                {vault.path}
+                              </p>
+                            </div>
+                          </div>
+
+                          <button
+                            onClick={() => handleRemoveVault(vault.path)}
+                            title="Remove from vault list"
+                            className="p-1.5 rounded-lg opacity-60 hover:opacity-100 hover:text-red-500 transition-colors cursor-pointer"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+
+                        <div className="flex items-center justify-between text-xs pt-2 border-t" style={{ borderColor: theme.colors.border }}>
+                          <div className="flex items-center gap-3" style={{ color: theme.colors.textSecondary }}>
+                            <span>{vault.file_count} files</span>
+                            <span>•</span>
+                            <span>{formatSize(vault.total_size_bytes)}</span>
+                          </div>
+
+                          <button
+                            onClick={() => handleToggleVaultLock(vault)}
+                            disabled={isProcessing}
+                            className="px-3.5 py-1.5 rounded-xl font-semibold text-xs flex items-center gap-1.5 transition-all cursor-pointer shadow-xs disabled:opacity-50"
+                            style={{
+                              backgroundColor: vault.is_locked ? theme.colors.accent : (isLight ? "#e2e8f0" : "#334155"),
+                              color: vault.is_locked ? theme.colors.accentText : theme.colors.textPrimary,
+                            }}
+                          >
+                            {isProcessing ? (
+                              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                            ) : vault.is_locked ? (
+                              <>
+                                <Unlock className="w-3.5 h-3.5" />
+                                <span>Decrypt Vault</span>
+                              </>
+                            ) : (
+                              <>
+                                <Lock className="w-3.5 h-3.5" />
+                                <span>Encrypt Now</span>
+                              </>
+                            )}
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
 
@@ -643,6 +887,48 @@ export default function App() {
                       </div>
                     );
                   })}
+                </div>
+              </div>
+
+              {/* Startup & Background Guardian Settings */}
+              <div
+                className="p-5 rounded-2xl border space-y-4"
+                style={{
+                  backgroundColor: theme.colors.bgCard,
+                  borderColor: theme.colors.borderCard,
+                }}
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div
+                      className="w-10 h-10 rounded-xl flex items-center justify-center"
+                      style={{ backgroundColor: theme.colors.badgeBg, color: theme.colors.accent }}
+                    >
+                      <Power className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h4 className="font-bold text-sm" style={{ color: theme.colors.textPrimary }}>
+                        Launch at System Startup
+                      </h4>
+                      <p className="text-xs" style={{ color: theme.colors.textSecondary }}>
+                        Automatically protect applications and stay active in your macOS Menu Bar when your Mac boots up.
+                      </p>
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={handleToggleAutostart}
+                    className="relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none"
+                    style={{
+                      backgroundColor: autostartEnabled ? theme.colors.toggleActive : theme.colors.toggleInactive,
+                    }}
+                  >
+                    <span
+                      className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
+                        autostartEnabled ? "translate-x-5" : "translate-x-0"
+                      }`}
+                    />
+                  </button>
                 </div>
               </div>
             </div>
