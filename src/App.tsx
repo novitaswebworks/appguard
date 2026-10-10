@@ -26,8 +26,11 @@ import {
   Settings,
   Clock,
   ShieldCheck,
+  Sparkles,
 } from "lucide-react";
 import { THEMES, ThemeMode } from "./theme";
+import { useUpdater } from "./useUpdater";
+import { UpdateModal } from "./UpdateModal";
 
 interface BiometricStatus {
   is_available: boolean;
@@ -81,6 +84,15 @@ export default function App() {
 
   const theme = THEMES[currentTheme] || THEMES.nordic;
   const isLight = theme.category === "light";
+
+  // Auto-updater hook
+  const {
+    state: updaterState,
+    checkForUpdates,
+    dismiss: dismissUpdater,
+    openDownload,
+    currentVersion,
+  } = useUpdater();
 
   const [biometrics, setBiometrics] = useState<BiometricStatus | null>(null);
   const [hasPin, setHasPin] = useState(false);
@@ -1630,6 +1642,59 @@ export default function App() {
                   </button>
                 </div>
               </div>
+
+              {/* Section 4: Software Updates */}
+              <div
+                className="p-6 rounded-2xl border space-y-4"
+                style={{
+                  backgroundColor: theme.colors.bgCard,
+                  borderColor: theme.colors.borderCard,
+                }}
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div
+                      className="w-10 h-10 rounded-xl flex items-center justify-center text-white"
+                      style={{ backgroundColor: theme.colors.accent }}
+                    >
+                      <Sparkles className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <h4 className="font-bold text-sm" style={{ color: theme.colors.textPrimary }}>
+                          App Updates
+                        </h4>
+                        <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-500 border border-blue-500/20 font-semibold">
+                          v{currentVersion}
+                        </span>
+                      </div>
+                      <p className="text-xs" style={{ color: theme.colors.textSecondary }}>
+                        {updaterState.status === "checking"
+                          ? "Checking GitHub for new releases..."
+                          : updaterState.status === "up-to-date"
+                          ? "AppGuard is up to date."
+                          : updaterState.status === "error"
+                          ? updaterState.message
+                          : "Automatically checks for releases on startup."}
+                      </p>
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={() => checkForUpdates(true)}
+                    disabled={updaterState.status === "checking"}
+                    className="py-2.5 px-4 rounded-xl text-xs font-semibold cursor-pointer border transition-all hover:opacity-90 flex items-center gap-2 disabled:opacity-50"
+                    style={{
+                      borderColor: theme.colors.border,
+                      backgroundColor: isLight ? "#f8fafc" : "rgba(255,255,255,0.04)",
+                      color: theme.colors.accent,
+                    }}
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${updaterState.status === "checking" ? "animate-spin" : ""}`} />
+                    <span>{updaterState.status === "checking" ? "Checking..." : "Check for Updates"}</span>
+                  </button>
+                </div>
+              </div>
             </div>
           )}
         </section>
@@ -2467,6 +2532,16 @@ export default function App() {
             </form>
           </div>
         </div>
+      )}
+
+      {/* Auto-Updater Notification Modal */}
+      {updaterState.status === "available" && (
+        <UpdateModal
+          info={updaterState.info}
+          onDismiss={dismissUpdater}
+          onDownloadUrl={openDownload}
+          theme={theme}
+        />
       )}
     </div>
   );
