@@ -1,9 +1,10 @@
 import { useEffect, useState, useCallback } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { getVersion } from "@tauri-apps/api/app";
 
 const GITHUB_REPO = "novitaswebworks/appguard";
 const LATEST_RELEASE_API = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`;
-const CURRENT_VERSION = "0.5.0";
+const FALLBACK_VERSION = "0.5.1";
 const LAST_CHECK_KEY = "appguard:updater:last_check";
 const CHECK_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 
@@ -58,6 +59,13 @@ export function detectUserPlatform(): "macos" | "windows" | "linux" {
 
 export function useUpdater() {
   const [state, setState] = useState<UpdaterState>({ status: "idle" });
+  const [currentVersion, setCurrentVersion] = useState<string>(FALLBACK_VERSION);
+
+  useEffect(() => {
+    getVersion()
+      .then((ver) => setCurrentVersion(ver))
+      .catch(() => setCurrentVersion(FALLBACK_VERSION));
+  }, []);
 
   const checkForUpdates = useCallback(async (manual = false) => {
     if (!manual) {
@@ -70,9 +78,12 @@ export function useUpdater() {
     setState({ status: "checking" });
 
     try {
-      const res = await fetch(LATEST_RELEASE_API, {
-        headers: { Accept: "application/vnd.github+json" },
-      });
+      const [appVer, res] = await Promise.all([
+        getVersion().catch(() => currentVersion),
+        fetch(LATEST_RELEASE_API, {
+          headers: { Accept: "application/vnd.github+json" },
+        }),
+      ]);
 
       if (!res.ok) {
         throw new Error(`GitHub API HTTP ${res.status}`);
@@ -83,7 +94,7 @@ export function useUpdater() {
       const data = await res.json();
       const remoteVersion = (data.tag_name || "").replace(/^v/, "");
 
-      if (isNewer(remoteVersion, CURRENT_VERSION)) {
+      if (isNewer(remoteVersion, appVer)) {
         const assets: ReleaseAsset[] = Array.isArray(data.assets)
           ? data.assets.map((a: any) => ({
               name: a.name,
@@ -96,7 +107,7 @@ export function useUpdater() {
           status: "available",
           info: {
             version: remoteVersion,
-            currentVersion: CURRENT_VERSION,
+            currentVersion: appVer,
             releaseNotes: data.body || "A new version of AppGuard is available.",
             releaseUrl: data.html_url || `https://github.com/${GITHUB_REPO}/releases/latest`,
             publishedAt: data.published_at || new Date().toISOString(),
@@ -113,7 +124,7 @@ export function useUpdater() {
         message: err?.message || "Failed to check for updates.",
       });
     }
-  }, []);
+  }, [currentVersion]);
 
   const dismiss = useCallback(() => {
     setState({ status: "idle" });
@@ -141,6 +152,6 @@ export function useUpdater() {
     checkForUpdates,
     dismiss,
     openDownload,
-    currentVersion: CURRENT_VERSION,
+    currentVersion,
   };
 }
