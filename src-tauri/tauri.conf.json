@@ -12,6 +12,7 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "AppGuard",
         "width": 960,
         "height": 680,

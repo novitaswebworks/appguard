@@ -592,28 +592,32 @@ export default function App() {
             style={{ borderColor: theme.colors.border }}
           >
             <div
-              className="w-10 h-10 rounded-xl flex items-center justify-center shadow-md text-white transition-transform duration-200 hover:scale-105"
+              className="w-10 h-10 rounded-2xl flex items-center justify-center shadow-lg text-white transition-all duration-300 hover:scale-105 relative overflow-hidden"
               style={{
-                backgroundColor: theme.colors.accent,
-                boxShadow: `0 8px 16px ${theme.colors.accentGlow}`,
+                background: `linear-gradient(135deg, ${theme.colors.accent}, #06b6d4)`,
+                boxShadow: `0 8px 20px ${theme.colors.accentGlow}`,
               }}
             >
-              <Shield className="w-5 h-5" />
+              <Shield className="w-5 h-5 relative z-10" />
+              <div className="absolute inset-0 bg-white/10 opacity-0 hover:opacity-100 transition-opacity" />
             </div>
             <div>
-              <h1 className="text-base font-bold tracking-tight flex items-center gap-1.5" style={{ color: theme.colors.textPrimary }}>
-                AppGuard
+              <h1 className="text-sm font-bold tracking-tight flex items-center gap-1.5" style={{ color: theme.colors.textPrimary }}>
+                <span>AppGuard</span>
                 <span
-                  className="text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded"
+                  className="text-[9px] uppercase font-bold tracking-widest px-1.5 py-0.5 rounded-full border"
                   style={{
                     backgroundColor: theme.colors.badgeBg,
+                    borderColor: theme.colors.border,
                     color: theme.colors.badgeText,
                   }}
                 >
-                  v0.3
+                  PRO
                 </span>
               </h1>
-              <p className="text-xs" style={{ color: theme.colors.textSecondary }}>Biometric Lockbox</p>
+              <p className="text-[11px] font-medium" style={{ color: theme.colors.textSecondary }}>
+                Zero-Knowledge Privacy Shield
+              </p>
             </div>
           </div>
 
@@ -1907,20 +1911,29 @@ export default function App() {
             {wizardStep === 1 && (
               <div className="space-y-5 animate-in fade-in duration-300">
                 <div
-                  className="w-16 h-16 rounded-2xl flex items-center justify-center mx-auto shadow-xl text-white"
+                  className="w-18 h-18 rounded-3xl flex items-center justify-center mx-auto shadow-2xl text-white relative overflow-hidden"
                   style={{
-                    backgroundColor: theme.colors.accent,
-                    boxShadow: `0 12px 24px ${theme.colors.accentGlow}`,
+                    background: `linear-gradient(135deg, ${theme.colors.accent}, #06b6d4)`,
+                    boxShadow: `0 16px 32px ${theme.colors.accentGlow}`,
                   }}
                 >
-                  <Shield className="w-8 h-8" />
+                  <Shield className="w-9 h-9 relative z-10" />
                 </div>
                 <div>
-                  <h3 className="text-xl font-bold" style={{ color: theme.colors.textPrimary }}>
+                  <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider mb-2 border"
+                    style={{
+                      backgroundColor: theme.colors.badgeBg,
+                      borderColor: theme.colors.border,
+                      color: theme.colors.badgeText,
+                    }}
+                  >
+                    <span>AppGuard Privacy Suite</span>
+                  </div>
+                  <h3 className="text-2xl font-bold tracking-tight" style={{ color: theme.colors.textPrimary }}>
                     Welcome to AppGuard
                   </h3>
-                  <p className="text-xs mt-1.5" style={{ color: theme.colors.textSecondary }}>
-                    Native hardware privacy shield & biometric protection for macOS
+                  <p className="text-xs mt-1.5 max-w-sm mx-auto" style={{ color: theme.colors.textSecondary }}>
+                    Native hardware biometrics & zero-knowledge encrypted vaults for macOS, Windows & Linux
                   </p>
                 </div>
 
@@ -2113,9 +2126,9 @@ export default function App() {
                             <div className="w-6 h-6 rounded-md bg-gray-100 dark:bg-gray-800 flex items-center justify-center">
                               {app.icon_base64 ? (
                                 <img
-                                  src={`data:image/png;base64,${app.icon_base64}`}
+                                  src={app.icon_base64}
                                   alt={app.name}
-                                  className="w-5 h-5 rounded"
+                                  className="w-5 h-5 rounded object-contain pointer-events-none select-none"
                                 />
                               ) : (
                                 <Shield className="w-3.5 h-3.5 text-gray-500" />

@@ -36,7 +36,7 @@ pub fn scan_installed_applications() -> Vec<ScannedApp> {
         }
     }
 
-    apps.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    apps.sort_by(|a: &ScannedApp, b: &ScannedApp| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     apps.dedup_by(|a, b| a.bundle_id == b.bundle_id);
     apps
 }

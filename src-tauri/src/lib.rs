@@ -199,7 +199,7 @@ fn lock_all_sessions(
 }
 
 #[tauri::command]
-fn close_locked_application(bundle_id: String) -> Result<bool, String> {
+fn close_locked_application(_bundle_id: String) -> Result<bool, String> {
     #[cfg(target_os = "macos")]
     {
         use objc2::msg_send;
@@ -218,7 +218,7 @@ fn close_locked_application(bundle_id: String) -> Result<bool, String> {
                             let app: *mut objc2::runtime::AnyObject =
                                 msg_send![running_apps, objectAtIndex: i];
                             let bid: *mut NSString = msg_send![app, bundleIdentifier];
-                            if !bid.is_null() && (*bid).to_string() == bundle_id {
+                            if !bid.is_null() && (*bid).to_string() == _bundle_id {
                                 // Force hide and terminate the unauthorized app
                                 let _: () = msg_send![app, hide];
                                 let _: bool = msg_send![app, terminate];
@@ -314,6 +314,16 @@ pub fn run() {
         .manage(security_manager)
         .setup(move |app| {
             let handle = app.handle().clone();
+
+            // Ensure main window is shown and focused unless launched with --minimized
+            let is_minimized_launch = std::env::args().any(|arg| arg == "--minimized");
+            if !is_minimized_launch {
+                if let Some(w) = handle.get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.unminimize();
+                    let _ = w.set_focus();
+                }
+            }
 
             // Register global hotkey Command+Shift+L to lock all sessions
             use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
