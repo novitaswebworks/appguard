@@ -69,7 +69,17 @@ pub fn start_focus_watchdog(app_handle: AppHandle, security: Arc<SecurityManager
                         if let Some(window) = app_handle.get_webview_window("main") {
                             let _ = window.show();
                             let _ = window.unminimize();
+                            let _ = window.set_always_on_top(true);
                             let _ = window.set_focus();
+
+                            // Force macOS App Activation to steal focus over the locked app
+                            if let Some(ns_app_cls) = AnyClass::get(c"NSApplication") {
+                                let shared_app: *mut objc2::runtime::AnyObject =
+                                    msg_send![ns_app_cls, sharedApplication];
+                                if !shared_app.is_null() {
+                                    let _: () = msg_send![shared_app, activateIgnoringOtherApps: true];
+                                }
+                            }
                         }
                     }
                 }

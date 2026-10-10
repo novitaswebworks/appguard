@@ -54,9 +54,16 @@ fn toggle_lock_app(
 #[tauri::command]
 fn unlock_app_session(
     bundle_id: String,
+    app_handle: tauri::AppHandle,
     security: State<'_, Arc<SecurityManager>>,
 ) -> Result<bool, String> {
     security.mark_app_unlocked(&bundle_id);
+
+    // Release always-on-top and hide AppGuard window so focus returns to the unlocked app
+    if let Some(window) = app_handle.get_webview_window("main") {
+        let _ = window.set_always_on_top(false);
+        let _ = window.hide();
+    }
     Ok(true)
 }
 
@@ -143,9 +150,19 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--minimized"]),
         ))
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(security_manager)
         .setup(move |app| {
             let handle = app.handle().clone();
+
+            // Register global hotkey Command+Shift+L to lock all sessions
+            use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
+            if let Ok(shortcut) = "CommandOrControl+Shift+L".parse::<Shortcut>() {
+                let shortcut_security = tray_security.clone();
+                let _ = app.global_shortcut().on_shortcut(shortcut, move |_app, _sc, _ev| {
+                    shortcut_security.lock_all();
+                });
+            }
 
             // Build enhanced system tray menu
             let count = tray_security.config.read().locked_apps.values().filter(|a| a.is_locked).count();

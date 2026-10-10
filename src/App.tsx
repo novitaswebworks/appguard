@@ -116,6 +116,21 @@ export default function App() {
         setPinInput("");
         setPinError(false);
         setAuthSuccess(false);
+
+        // Auto-trigger biometric dialog without requiring manual click
+        setTimeout(() => {
+          invoke<boolean>("authenticate_biometrics", {
+            reason: `Unlock ${event.payload.name}`,
+          })
+            .then((success) => {
+              if (success) {
+                completeUnlock(event.payload.bundle_id);
+              }
+            })
+            .catch(() => {
+              // User cancelled Touch ID or fell back to PIN
+            });
+        }, 150);
       }
     );
 
