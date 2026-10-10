@@ -257,6 +257,10 @@ impl PlatformOps for MacPlatformOps {
 <dict>
     <key>Label</key>
     <string>com.appguard.watchdog</string>
+    <key>AssociatedBundleIdentifiers</key>
+    <array>
+        <string>com.appguard.desktop</string>
+    </array>
     <key>ProgramArguments</key>
     <array>
         <string>{}</string>
@@ -265,7 +269,7 @@ impl PlatformOps for MacPlatformOps {
     <key>KeepAlive</key>
     <true/>
     <key>RunAtLoad</key>
-    <true/>
+    <false/>
     <key>ProcessType</key>
     <string>Interactive</string>
 </dict>
