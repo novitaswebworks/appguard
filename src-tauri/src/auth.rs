@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BiometricStatus {
     pub is_available: bool,
-    pub biometric_type: String, // "TouchID", "FaceID", "WindowsHello", or "None"
+    pub biometric_type: String, // "TouchID", "FaceID", "SystemPasscode", "WindowsHello", or "PIN"
+    pub has_system_passcode: bool,
     pub error_message: Option<String>,
 }
 
@@ -24,6 +25,7 @@ mod macos {
                     return BiometricStatus {
                         is_available: false,
                         biometric_type: "None".into(),
+                        has_system_passcode: false,
                         error_message: Some("LocalAuthentication framework not found".into()),
                     };
                 }
@@ -34,16 +36,21 @@ mod macos {
                 return BiometricStatus {
                     is_available: false,
                     biometric_type: "None".into(),
+                    has_system_passcode: false,
                     error_message: Some("Failed to allocate LAContext".into()),
                 };
             }
 
             // LAPolicyDeviceOwnerAuthenticationWithBiometrics = 1
-            // LAPolicyDeviceOwnerAuthentication (Biometrics + Passcode) = 2
-            let mut error: *mut objc2::runtime::AnyObject = std::ptr::null_mut();
-            let can_evaluate: Bool = msg_send![context, canEvaluatePolicy: 1isize, error: &mut error];
+            // LAPolicyDeviceOwnerAuthentication (Biometrics + Mac Password fallback) = 2
+            let mut bio_error: *mut objc2::runtime::AnyObject = std::ptr::null_mut();
+            let can_evaluate_bio: Bool = msg_send![context, canEvaluatePolicy: 1isize, error: &mut bio_error];
 
-            if can_evaluate.as_bool() {
+            let mut pass_error: *mut objc2::runtime::AnyObject = std::ptr::null_mut();
+            let can_evaluate_passcode: Bool = msg_send![context, canEvaluatePolicy: 2isize, error: &mut pass_error];
+            let has_system_passcode = can_evaluate_passcode.as_bool();
+
+            if can_evaluate_bio.as_bool() {
                 // LABiometryType: 0=None, 1=TouchID, 2=FaceID, 3=OpticID
                 let biometry_type: isize = msg_send![context, biometryType];
                 let b_type = match biometry_type {
@@ -54,13 +61,23 @@ mod macos {
                 BiometricStatus {
                     is_available: true,
                     biometric_type: b_type.into(),
+                    has_system_passcode,
+                    error_message: None,
+                }
+            } else if has_system_passcode {
+                // Mac without Touch ID hardware, but has system login password enrolled
+                BiometricStatus {
+                    is_available: true,
+                    biometric_type: "SystemPassword".into(),
+                    has_system_passcode: true,
                     error_message: None,
                 }
             } else {
                 BiometricStatus {
                     is_available: false,
-                    biometric_type: "None".into(),
-                    error_message: Some("Touch ID / Passcode not enrolled or not supported".into()),
+                    biometric_type: "PIN".into(),
+                    has_system_passcode: false,
+                    error_message: Some("No biometric hardware or system passcode enrolled. Master PIN will be used.".into()),
                 }
             }
         }
@@ -118,6 +135,7 @@ mod fallback {
         BiometricStatus {
             is_available: false,
             biometric_type: "MasterPIN".into(),
+            has_system_passcode: false,
             error_message: Some("Native biometrics fallback to Master PIN on this platform".into()),
         }
     }

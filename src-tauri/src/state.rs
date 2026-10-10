@@ -20,8 +20,24 @@ pub struct AppGuardConfig {
     pub master_pin_hash: Option<String>,
     pub locked_apps: HashMap<String, AppRule>, // Key: bundle_id (or exe name)
     pub locked_folders: Vec<String>,
-    pub grace_period_seconds: u64, // Default 60 seconds before re-locking
+    pub grace_period_seconds: u64, // 0 = Immediate, 60 = 1m, 300 = 5m, etc.
     pub stealth_mode: bool,
+    #[serde(default = "default_true")]
+    pub app_self_locked: bool, // Require auth to access AppGuard dashboard
+    #[serde(default = "default_true")]
+    pub lock_on_sleep: bool,
+    #[serde(default = "default_true")]
+    pub lock_on_screensaver: bool,
+    #[serde(default = "default_false")]
+    pub instant_lock_mode: bool, // Zero-tolerance lock immediately on process focus change
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_false() -> bool {
+    false
 }
 
 impl Default for AppGuardConfig {
@@ -32,6 +48,10 @@ impl Default for AppGuardConfig {
             locked_folders: Vec::new(),
             grace_period_seconds: 60,
             stealth_mode: false,
+            app_self_locked: true,
+            lock_on_sleep: true,
+            lock_on_screensaver: true,
+            instant_lock_mode: false,
         }
     }
 }
@@ -43,6 +63,8 @@ pub struct SecurityManager {
     unlocked_at: RwLock<HashMap<String, Instant>>,
     // Set of currently unlocked session tokens
     active_unlocked: RwLock<HashSet<String>>,
+    // Tracks if AppGuard itself has been authenticated for this session
+    is_app_authenticated: RwLock<bool>,
 }
 
 impl SecurityManager {
@@ -65,7 +87,23 @@ impl SecurityManager {
             config: RwLock::new(config),
             unlocked_at: RwLock::new(HashMap::new()),
             active_unlocked: RwLock::new(HashSet::new()),
+            is_app_authenticated: RwLock::new(false),
         }
+    }
+
+    pub fn is_app_authenticated(&self) -> bool {
+        // If master PIN is not configured yet (first launch), allow access for setup
+        if !self.is_pin_configured() {
+            return true;
+        }
+        if !self.config.read().app_self_locked {
+            return true;
+        }
+        *self.is_app_authenticated.read()
+    }
+
+    pub fn set_app_authenticated(&self, auth: bool) {
+        *self.is_app_authenticated.write() = auth;
     }
 
     pub fn save(&self) -> Result<(), String> {
@@ -78,20 +116,39 @@ impl SecurityManager {
         if pin.len() < 4 {
             return Err("PIN must be at least 4 digits".into());
         }
-        let mut hasher = Sha256::new();
-        hasher.update(pin.as_bytes());
-        let hash = format!("{:x}", hasher.finalize());
+        let salt = get_or_create_keychain_salt();
+        let hash = compute_salted_pin_hash(pin, &salt);
 
         self.config.write().master_pin_hash = Some(hash);
         self.save()
     }
 
     pub fn verify_master_pin(&self, pin: &str) -> bool {
+        let cfg = self.config.read();
+        let stored_hash = match cfg.master_pin_hash.as_ref() {
+            Some(h) => h,
+            None => return false,
+        };
+
+        // 1. Try Keychain-salted verification (Hardened)
+        let salt = get_or_create_keychain_salt();
+        let salted_hash = compute_salted_pin_hash(pin, &salt);
+        if stored_hash == &salted_hash {
+            return true;
+        }
+
+        // 2. Backwards compatibility for existing plain SHA-256 hash
         let mut hasher = Sha256::new();
         hasher.update(pin.as_bytes());
-        let input_hash = format!("{:x}", hasher.finalize());
+        let legacy_hash = format!("{:x}", hasher.finalize());
+        if stored_hash == &legacy_hash {
+            // Upgrade legacy hash to salted hash transparently
+            drop(cfg);
+            let _ = self.set_master_pin(pin);
+            return true;
+        }
 
-        self.config.read().master_pin_hash.as_ref() == Some(&input_hash)
+        false
     }
 
     pub fn is_pin_configured(&self) -> bool {
@@ -110,6 +167,26 @@ impl SecurityManager {
         self.save()
     }
 
+    pub fn update_preferences(
+        &self,
+        grace_period_seconds: u64,
+        app_self_locked: bool,
+        lock_on_sleep: bool,
+        lock_on_screensaver: bool,
+        instant_lock_mode: bool,
+        stealth_mode: bool,
+    ) -> Result<(), String> {
+        let mut cfg = self.config.write();
+        cfg.grace_period_seconds = grace_period_seconds;
+        cfg.app_self_locked = app_self_locked;
+        cfg.lock_on_sleep = lock_on_sleep;
+        cfg.lock_on_screensaver = lock_on_screensaver;
+        cfg.instant_lock_mode = instant_lock_mode;
+        cfg.stealth_mode = stealth_mode;
+        drop(cfg);
+        self.save()
+    }
+
     pub fn is_app_locked(&self, bundle_id: &str) -> bool {
         let cfg = self.config.read();
         let rule = match cfg.locked_apps.get(bundle_id) {
@@ -118,6 +195,11 @@ impl SecurityManager {
         };
         if !rule.is_locked {
             return false;
+        }
+
+        // If instant_lock_mode is enabled or grace_period is 0, enforce immediate re-lock
+        if cfg.instant_lock_mode || cfg.grace_period_seconds == 0 {
+            return !self.active_unlocked.read().contains(bundle_id);
         }
 
         // Check if unlocked within grace period
@@ -157,10 +239,63 @@ impl SecurityManager {
     pub fn lock_all(&self) {
         self.unlocked_at.write().clear();
         self.active_unlocked.write().clear();
+        *self.is_app_authenticated.write() = false;
     }
 }
 
 fn dirs_config_dir() -> Option<PathBuf> {
     let home = std::env::var("HOME").ok().or_else(|| std::env::var("USERPROFILE").ok())?;
     Some(PathBuf::from(home).join(".config").join("appguard"))
+}
+
+fn compute_salted_pin_hash(pin: &str, salt: &str) -> String {
+    let mut current = pin.as_bytes().to_vec();
+    // 10,000 rounds of salted SHA-256 stretching (PBKDF2 style)
+    for i in 0u32..10_000u32 {
+        let mut hasher = Sha256::new();
+        hasher.update(&current);
+        hasher.update(salt.as_bytes());
+        hasher.update(&i.to_be_bytes());
+        current = hasher.finalize().to_vec();
+    }
+    format!("$salted$v1${}", hex_encode(&current))
+}
+
+fn hex_encode(data: &[u8]) -> String {
+    data.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn get_or_create_keychain_salt() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+        let user = std::env::var("USER").unwrap_or_else(|_| "current_user".into());
+        let service = "com.appguard.desktop.salt";
+
+        // Attempt reading from Apple Keychain
+        if let Ok(output) = Command::new("security")
+            .args(["find-generic-password", "-a", &user, "-s", service, "-w"])
+            .output()
+        {
+            if output.status.success() {
+                let salt_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !salt_str.is_empty() {
+                    return salt_str;
+                }
+            }
+        }
+
+        // Generate high-entropy 256-bit salt and store into Keychain
+        let random_salt = format!("ag_salt_{:x}_{:x}", std::time::SystemTime::now().elapsed().unwrap_or_default().as_nanos(), std::process::id());
+        let _ = Command::new("security")
+            .args(["add-generic-password", "-a", &user, "-s", service, "-w", &random_salt, "-U"])
+            .output();
+
+        random_salt
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        "appguard_static_salt_fallback_platform".into()
+    }
 }

@@ -27,7 +27,7 @@ fn derive_key(passphrase: &str) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// Encrypts all files inside a directory in-place with AES-256-GCM
+/// Encrypts all files inside a directory in-place with AES-256-GCM and enforces OS-level folder shielding
 pub fn lock_folder(folder_path_str: &str, passphrase: &str) -> Result<bool, String> {
     let folder = Path::new(folder_path_str);
     if !folder.exists() || !folder.is_dir() {
@@ -44,14 +44,30 @@ pub fn lock_folder(folder_path_str: &str, passphrase: &str) -> Result<bool, Stri
     let marker = folder.join(".appguard_status");
     let _ = fs::write(marker, b"LOCKED");
 
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+        // Hide the folder in Finder and set permission shield
+        let _ = Command::new("chflags").arg("hidden").arg(folder_path_str).status();
+        let _ = Command::new("chmod").arg("000").arg(folder_path_str).status();
+    }
+
     Ok(true)
 }
 
-/// Decrypts all files inside a directory in-place with AES-256-GCM
+/// Decrypts all files inside a directory in-place with AES-256-GCM and restores normal folder access
 pub fn unlock_folder(folder_path_str: &str, passphrase: &str) -> Result<bool, String> {
     let folder = Path::new(folder_path_str);
     if !folder.exists() || !folder.is_dir() {
         return Err("Target folder does not exist or is not a directory".into());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+        // First restore permissions so files can be decrypted
+        let _ = Command::new("chmod").arg("755").arg(folder_path_str).status();
+        let _ = Command::new("chflags").arg("nohidden").arg(folder_path_str).status();
     }
 
     let key_bytes = derive_key(passphrase);
@@ -164,7 +180,10 @@ pub fn inspect_vault(path_str: &str) -> Option<VaultItem> {
         .unwrap_or(path_str)
         .to_string();
 
-    let is_locked = path.join(".appguard_status").exists();
+    let is_locked = path.join(".appguard_status").exists() || {
+        // If chmod 000 is active, fs::read_dir or status check will encounter permission denied
+        fs::read_dir(path).is_err()
+    };
     let mut file_count = 0;
     let mut total_size = 0;
 

@@ -23,12 +23,16 @@ import {
   Trash2,
   HardDrive,
   Power,
+  Settings,
+  Clock,
+  ShieldCheck,
 } from "lucide-react";
 import { THEMES, ThemeMode } from "./theme";
 
 interface BiometricStatus {
   is_available: boolean;
   biometric_type: string;
+  has_system_passcode?: boolean;
   error_message?: string;
 }
 
@@ -62,10 +66,14 @@ interface AppGuardConfig {
   locked_folders: string[];
   grace_period_seconds: number;
   stealth_mode: boolean;
+  app_self_locked: boolean;
+  lock_on_sleep: boolean;
+  lock_on_screensaver: boolean;
+  instant_lock_mode: boolean;
 }
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<"apps" | "vault" | "appearance">("apps");
+  const [activeTab, setActiveTab] = useState<"apps" | "vault" | "appearance" | "settings">("apps");
   const [currentTheme, setCurrentTheme] = useState<ThemeMode>(() => {
     return (localStorage.getItem("appguard_theme") as ThemeMode) || "nordic";
   });
@@ -78,6 +86,7 @@ export default function App() {
   const [config, setConfig] = useState<AppGuardConfig | null>(null);
   const [apps, setApps] = useState<ScannedApp[]>([]);
   const [search, setSearch] = useState("");
+  const [appFilter, setAppFilter] = useState<"all" | "locked" | "unlocked">("all");
   const [loadingApps, setLoadingApps] = useState(false);
 
   // Lock Trigger Overlay State
@@ -99,6 +108,40 @@ export default function App() {
 
   // Autostart toggle state
   const [autostartEnabled, setAutostartEnabled] = useState(false);
+
+  // In-app PIN Dialog for Encrypted Vaults
+  const [vaultPinModal, setVaultPinModal] = useState<{
+    item: VaultItem;
+    action: "encrypt" | "decrypt";
+    pin: string;
+    error: string;
+  } | null>(null);
+
+  // AppGuard Self-Lock Gate (Protects AppGuard itself from unauthorized access)
+  const [isAppLocked, setIsAppLocked] = useState(false);
+  const [selfLockPinInput, setSelfLockPinInput] = useState("");
+  const [selfLockPinError, setSelfLockPinError] = useState(false);
+  const [selfLockAuthSuccess, setSelfLockAuthSuccess] = useState(false);
+  const [lockAllSuccess, setLockAllSuccess] = useState(false);
+
+  // First time 3-step setup wizard
+  const [showWelcomeSetup, setShowWelcomeSetup] = useState(false);
+  const [wizardStep, setWizardStep] = useState<1 | 2 | 3>(1);
+  const [wizardPin, setWizardPin] = useState("");
+  const [wizardConfirmPin, setWizardConfirmPin] = useState("");
+  const [wizardError, setWizardError] = useState("");
+  const [wizardSelectedBundles, setWizardSelectedBundles] = useState<Set<string>>(
+    new Set(["com.apple.Notes", "com.apple.MobileSMS", "com.apple.Photos", "com.apple.Terminal"])
+  );
+
+  // Settings tab state
+  const [changePinModalOpen, setChangePinModalOpen] = useState(false);
+  const [oldPinInput, setOldPinInput] = useState("");
+  const [newChangePinInput, setNewChangePinInput] = useState("");
+  const [confirmChangePinInput, setConfirmChangePinInput] = useState("");
+  const [changePinError, setChangePinError] = useState("");
+  const [changePinSuccess, setChangePinSuccess] = useState(false);
+  const [settingsSaveFeedback, setSettingsSaveFeedback] = useState(false);
 
   useEffect(() => {
     localStorage.setItem("appguard_theme", currentTheme);
@@ -134,8 +177,15 @@ export default function App() {
       }
     );
 
+    const unlistenLocked = listen("sessions-locked", () => {
+      setIsAppLocked(true);
+      setLockAllSuccess(true);
+      setTimeout(() => setLockAllSuccess(false), 2000);
+    });
+
     return () => {
       unlistenPromise.then((unlisten) => unlisten());
+      unlistenLocked.then((unlisten) => unlisten());
     };
   }, []);
 
@@ -146,6 +196,20 @@ export default function App() {
 
       const pinConfigured = await invoke<boolean>("is_pin_configured");
       setHasPin(pinConfigured);
+      if (!pinConfigured) {
+        setShowWelcomeSetup(true);
+      } else {
+        const isAuth = await invoke<boolean>("is_app_authenticated");
+        if (!isAuth) {
+          setIsAppLocked(true);
+          // Try auto biometric verification if available
+          if (bio.is_available) {
+            setTimeout(() => {
+              handleSelfLockBiometric();
+            }, 250);
+          }
+        }
+      }
 
       const cfg = await invoke<AppGuardConfig>("get_config");
       setConfig(cfg);
@@ -215,25 +279,36 @@ export default function App() {
     }
   }
 
-  async function handleToggleVaultLock(item: VaultItem) {
+  function handleToggleVaultLock(item: VaultItem) {
     if (!hasPin) {
       setShowPinSetup(true);
       return;
     }
 
-    const pin = prompt(`Enter Master Recovery PIN to ${item.is_locked ? "decrypt" : "encrypt"} "${item.name}":`);
-    if (!pin) return;
+    setVaultPinModal({
+      item,
+      action: item.is_locked ? "decrypt" : "encrypt",
+      pin: "",
+      error: "",
+    });
+  }
 
+  async function handleVaultPinSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!vaultPinModal || !vaultPinModal.pin) return;
+
+    const { item, action, pin } = vaultPinModal;
     setVaultActionLoading(item.path);
     try {
-      if (item.is_locked) {
+      if (action === "decrypt") {
         await invoke("decrypt_vault_folder", { folderPath: item.path, pin });
       } else {
         await invoke("encrypt_vault_folder", { folderPath: item.path, pin });
       }
+      setVaultPinModal(null);
       loadVaults();
-    } catch (e: any) {
-      alert(`Vault operation failed: ${e}`);
+    } catch (err: any) {
+      setVaultPinModal((prev) => prev ? { ...prev, error: String(err) } : null);
     } finally {
       setVaultActionLoading(null);
     }
@@ -300,6 +375,52 @@ export default function App() {
     }
   }
 
+  async function handleSelfLockBiometric() {
+    try {
+      const authLabel = biometrics?.biometric_type === "SystemPassword"
+        ? "Authenticate with macOS Password to open AppGuard"
+        : `Authenticate with ${biometrics?.biometric_type || "Touch ID"} to open AppGuard`;
+
+      const success = await invoke<boolean>("authenticate_biometrics", {
+        reason: authLabel,
+      });
+      if (success) {
+        await invoke("unlock_appguard");
+        setSelfLockAuthSuccess(true);
+        setTimeout(() => {
+          setIsAppLocked(false);
+          setSelfLockAuthSuccess(false);
+        }, 500);
+      }
+    } catch (e) {
+      console.error("Self-lock biometric failed:", e);
+      setSelfLockPinError(true);
+    }
+  }
+
+  async function handleSelfLockPinSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!selfLockPinInput) return;
+
+    try {
+      const valid = await invoke<boolean>("verify_pin", { pin: selfLockPinInput });
+      if (valid) {
+        await invoke("unlock_appguard");
+        setSelfLockAuthSuccess(true);
+        setTimeout(() => {
+          setIsAppLocked(false);
+          setSelfLockAuthSuccess(false);
+          setSelfLockPinInput("");
+        }, 500);
+      } else {
+        setSelfLockPinError(true);
+        setSelfLockPinInput("");
+      }
+    } catch (e) {
+      setSelfLockPinError(true);
+    }
+  }
+
   async function completeUnlock(bundle_id: string) {
     setAuthSuccess(true);
     await invoke("unlock_app_session", { bundleId: bundle_id });
@@ -307,6 +428,15 @@ export default function App() {
       setLockedTrigger(null);
       setAuthSuccess(false);
     }, 600);
+  }
+
+  async function handleCancelLockedTrigger() {
+    if (lockedTrigger) {
+      await invoke("close_locked_application", { bundleId: lockedTrigger.bundle_id });
+      setLockedTrigger(null);
+      setPinInput("");
+      setPinError(false);
+    }
   }
 
   async function handleSavePin(e: React.FormEvent) {
@@ -332,10 +462,110 @@ export default function App() {
     }
   }
 
-  const filteredApps = apps.filter((a) =>
-    a.name.toLowerCase().includes(search.toLowerCase()) ||
-    a.bundle_id.toLowerCase().includes(search.toLowerCase())
-  );
+  async function handleFinishWizard() {
+    setWizardError("");
+    if (wizardPin.length < 4) {
+      setWizardError("PIN must be at least 4 digits");
+      return;
+    }
+    if (wizardPin !== wizardConfirmPin) {
+      setWizardError("PINs do not match");
+      return;
+    }
+
+    try {
+      await invoke("set_master_pin", { pin: wizardPin });
+      setHasPin(true);
+      await invoke("unlock_appguard");
+
+      // Lock all selected apps from step 3
+      for (const bundleId of wizardSelectedBundles) {
+        const matching = apps.find((a) => a.bundle_id === bundleId);
+        if (matching) {
+          await invoke("toggle_lock_app", {
+            app: {
+              bundle_id: matching.bundle_id,
+              name: matching.name,
+              path: matching.path,
+              is_locked: true,
+            },
+          });
+        }
+      }
+
+      const updatedConfig = await invoke<AppGuardConfig>("get_config");
+      setConfig(updatedConfig);
+      setShowWelcomeSetup(false);
+      setIsAppLocked(false);
+    } catch (err: any) {
+      setWizardError(String(err));
+    }
+  }
+
+  async function handleUpdatePreference<K extends keyof AppGuardConfig>(
+    key: K,
+    value: AppGuardConfig[K]
+  ) {
+    if (!config) return;
+    const nextConfig = { ...config, [key]: value };
+    setConfig(nextConfig);
+
+    try {
+      await invoke("update_preferences", {
+        gracePeriodSeconds: nextConfig.grace_period_seconds,
+        appSelfLocked: nextConfig.app_self_locked,
+        lockOnSleep: nextConfig.lock_on_sleep,
+        lockOnScreensaver: nextConfig.lock_on_screensaver,
+        instantLockMode: nextConfig.instant_lock_mode,
+        stealthMode: nextConfig.stealth_mode,
+      });
+      setSettingsSaveFeedback(true);
+      setTimeout(() => setSettingsSaveFeedback(false), 1500);
+    } catch (err) {
+      console.error("Failed to update preferences:", err);
+    }
+  }
+
+  async function handleChangeMasterPin(e: React.FormEvent) {
+    e.preventDefault();
+    setChangePinError("");
+    if (newChangePinInput.length < 4) {
+      setChangePinError("New PIN must be at least 4 digits");
+      return;
+    }
+    if (newChangePinInput !== confirmChangePinInput) {
+      setChangePinError("New PINs do not match");
+      return;
+    }
+
+    try {
+      await invoke("change_master_pin", {
+        oldPin: oldPinInput,
+        newPin: newChangePinInput,
+      });
+      setChangePinSuccess(true);
+      setTimeout(() => {
+        setChangePinModalOpen(false);
+        setChangePinSuccess(false);
+        setOldPinInput("");
+        setNewChangePinInput("");
+        setConfirmChangePinInput("");
+      }, 1200);
+    } catch (err: any) {
+      setChangePinError(String(err));
+    }
+  }
+
+  const filteredApps = apps.filter((a) => {
+    const matchesSearch =
+      a.name.toLowerCase().includes(search.toLowerCase()) ||
+      a.bundle_id.toLowerCase().includes(search.toLowerCase());
+    if (!matchesSearch) return false;
+    const isLocked = !!config?.locked_apps[a.bundle_id]?.is_locked;
+    if (appFilter === "locked") return isLocked;
+    if (appFilter === "unlocked") return !isLocked;
+    return true;
+  });
 
   const lockedCount = Object.values(config?.locked_apps || {}).filter((a) => a.is_locked).length;
 
@@ -380,7 +610,7 @@ export default function App() {
                     color: theme.colors.badgeText,
                   }}
                 >
-                  v0.1
+                  v0.3
                 </span>
               </h1>
               <p className="text-xs" style={{ color: theme.colors.textSecondary }}>Biometric Lockbox</p>
@@ -427,6 +657,21 @@ export default function App() {
               <div className="flex items-center gap-2.5">
                 <FolderLock className="w-4 h-4" />
                 <span>Encrypted Vaults</span>
+              </div>
+            </button>
+
+            <button
+              onClick={() => setActiveTab("settings")}
+              className="w-full flex items-center justify-between px-3.5 py-2.5 rounded-lg text-sm font-medium transition-all cursor-pointer"
+              style={{
+                backgroundColor: activeTab === "settings" ? (isLight ? "#e2e8f0" : "rgba(255,255,255,0.06)") : "transparent",
+                color: activeTab === "settings" ? theme.colors.accent : theme.colors.textSecondary,
+                fontWeight: activeTab === "settings" ? 600 : 500,
+              }}
+            >
+              <div className="flex items-center gap-2.5">
+                <Settings className="w-4 h-4" />
+                <span>Security & Settings</span>
               </div>
             </button>
 
@@ -487,11 +732,27 @@ export default function App() {
           </div>
 
           <button
-            onClick={() => invoke("lock_all_sessions")}
-            className="w-full mt-2 py-2 px-3 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer border border-red-500/20 bg-red-500/10 hover:bg-red-500/20 text-red-600 dark:text-red-400"
+            onClick={async () => {
+              await invoke("lock_all_sessions");
+              setIsAppLocked(true);
+            }}
+            className={`w-full mt-2 py-2 px-3 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer border ${
+              lockAllSuccess
+                ? "border-emerald-500/30 bg-emerald-500/20 text-emerald-600 dark:text-emerald-400"
+                : "border-red-500/20 bg-red-500/10 hover:bg-red-500/20 text-red-600 dark:text-red-400"
+            }`}
           >
-            <Lock className="w-3.5 h-3.5" />
-            <span>Lock All Now</span>
+            {lockAllSuccess ? (
+              <>
+                <Check className="w-3.5 h-3.5 animate-scale" />
+                <span>All Locked & Hidden!</span>
+              </>
+            ) : (
+              <>
+                <Lock className="w-3.5 h-3.5" />
+                <span>Lock All Now</span>
+              </>
+            )}
           </button>
         </div>
       </aside>
@@ -557,78 +818,188 @@ export default function App() {
         <section className="flex-1 overflow-y-auto p-6">
           {/* TAB 1: APPS */}
           {activeTab === "apps" && (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
-              {filteredApps.map((app) => {
-                const isLocked = !!config?.locked_apps[app.bundle_id]?.is_locked;
-                return (
+            <div className="space-y-5">
+              {/* Security Health / Metrics Overview Banner */}
+              <div
+                className="p-4 rounded-2xl border flex flex-col sm:flex-row items-center justify-between gap-4 glass-surface transition-all"
+                style={{
+                  backgroundColor: isLight ? "rgba(255,255,255,0.7)" : "rgba(255,255,255,0.03)",
+                  borderColor: theme.colors.border,
+                }}
+              >
+                <div className="flex items-center gap-3.5 w-full sm:w-auto">
                   <div
-                    key={app.bundle_id}
-                    className="p-4 rounded-xl border transition-all flex items-center justify-between shadow-xs"
+                    className="w-11 h-11 rounded-xl flex items-center justify-center text-white shadow-md flex-shrink-0"
                     style={{
-                      backgroundColor: isLocked ? theme.colors.bgCardLocked : theme.colors.bgCard,
-                      borderColor: isLocked ? theme.colors.borderLocked : theme.colors.borderCard,
+                      backgroundColor: theme.colors.accent,
+                      boxShadow: `0 8px 16px ${theme.colors.accentGlow}`,
                     }}
                   >
-                    <div className="flex items-center gap-3 min-w-0 pr-3">
-                      {app.icon_base64 ? (
-                        <div className="w-10 h-10 rounded-xl overflow-hidden flex-shrink-0 bg-transparent flex items-center justify-center shadow-xs">
-                          <img
-                            src={app.icon_base64}
-                            alt={app.name}
-                            className="w-full h-full object-contain pointer-events-none select-none"
-                            loading="lazy"
-                          />
-                        </div>
-                      ) : (
-                        <div
-                          className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 transition-colors"
-                          style={{
-                            backgroundColor: isLocked ? theme.colors.badgeBg : (isLight ? "#f1f5f9" : "#1e293b"),
-                            color: isLocked ? theme.colors.accent : theme.colors.textMuted,
-                          }}
-                        >
-                          {isLocked ? <Lock className="w-5 h-5" /> : <Unlock className="w-5 h-5" />}
-                        </div>
-                      )}
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-1.5">
-                          <h4 className="text-sm font-semibold truncate" style={{ color: theme.colors.textPrimary }}>
-                            {app.name}
-                          </h4>
-                          {isLocked && (
-                            <span
-                              className="text-[10px] px-1.5 py-0.5 rounded-full font-medium"
+                    <Shield className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold flex items-center gap-2" style={{ color: theme.colors.textPrimary }}>
+                      System Privacy Status
+                      <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold uppercase tracking-wider bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
+                        Active Shield
+                      </span>
+                    </h3>
+                    <p className="text-xs" style={{ color: theme.colors.textSecondary }}>
+                      {lockedCount === 0
+                        ? "No apps shielded yet. Select apps below to guard against unauthorized access."
+                        : `${lockedCount} app${lockedCount > 1 ? "s" : ""} protected with hardware biometrics and instant window shield.`}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Filter Pills */}
+                <div
+                  className="flex items-center p-1 rounded-xl border w-full sm:w-auto justify-between sm:justify-start"
+                  style={{
+                    backgroundColor: isLight ? "#f1f5f9" : "rgba(255,255,255,0.04)",
+                    borderColor: theme.colors.border,
+                  }}
+                >
+                  <button
+                    onClick={() => setAppFilter("all")}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                      appFilter === "all"
+                        ? "shadow-xs text-white"
+                        : "opacity-70 hover:opacity-100"
+                    }`}
+                    style={{
+                      backgroundColor: appFilter === "all" ? theme.colors.accent : "transparent",
+                      color: appFilter === "all" ? "#fff" : theme.colors.textSecondary,
+                    }}
+                  >
+                    All ({apps.length})
+                  </button>
+                  <button
+                    onClick={() => setAppFilter("locked")}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                      appFilter === "locked"
+                        ? "shadow-xs text-white"
+                        : "opacity-70 hover:opacity-100"
+                    }`}
+                    style={{
+                      backgroundColor: appFilter === "locked" ? theme.colors.accent : "transparent",
+                      color: appFilter === "locked" ? "#fff" : theme.colors.textSecondary,
+                    }}
+                  >
+                    Shielded ({lockedCount})
+                  </button>
+                  <button
+                    onClick={() => setAppFilter("unlocked")}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                      appFilter === "unlocked"
+                        ? "shadow-xs text-white"
+                        : "opacity-70 hover:opacity-100"
+                    }`}
+                    style={{
+                      backgroundColor: appFilter === "unlocked" ? theme.colors.accent : "transparent",
+                      color: appFilter === "unlocked" ? "#fff" : theme.colors.textSecondary,
+                    }}
+                  >
+                    Unprotected ({Math.max(0, apps.length - lockedCount)})
+                  </button>
+                </div>
+              </div>
+
+              {filteredApps.length === 0 ? (
+                <div
+                  className="p-12 rounded-2xl border-2 border-dashed flex flex-col items-center justify-center text-center space-y-3"
+                  style={{ borderColor: theme.colors.border }}
+                >
+                  <div
+                    className="w-12 h-12 rounded-2xl flex items-center justify-center shadow-md"
+                    style={{ backgroundColor: theme.colors.badgeBg, color: theme.colors.accent }}
+                  >
+                    <Search className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-bold" style={{ color: theme.colors.textPrimary }}>
+                      No applications found
+                    </h4>
+                    <p className="text-xs max-w-sm mt-1" style={{ color: theme.colors.textMuted }}>
+                      {search ? `No results matching "${search}"` : "Try changing the filter or rescan your applications."}
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
+                  {filteredApps.map((app) => {
+                    const isLocked = !!config?.locked_apps[app.bundle_id]?.is_locked;
+                    return (
+                      <div
+                        key={app.bundle_id}
+                        className="p-4 rounded-xl border transition-all flex items-center justify-between shadow-xs app-card-interactive"
+                        style={{
+                          backgroundColor: isLocked ? theme.colors.bgCardLocked : theme.colors.bgCard,
+                          borderColor: isLocked ? theme.colors.borderLocked : theme.colors.borderCard,
+                        }}
+                      >
+                        <div className="flex items-center gap-3 min-w-0 pr-3">
+                          {app.icon_base64 ? (
+                            <div className="w-10 h-10 rounded-xl overflow-hidden flex-shrink-0 bg-transparent flex items-center justify-center shadow-xs">
+                              <img
+                                src={app.icon_base64}
+                                alt={app.name}
+                                className="w-full h-full object-contain pointer-events-none select-none"
+                                loading="lazy"
+                              />
+                            </div>
+                          ) : (
+                            <div
+                              className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 transition-colors"
                               style={{
-                                backgroundColor: theme.colors.badgeBg,
-                                color: theme.colors.badgeText,
+                                backgroundColor: isLocked ? theme.colors.badgeBg : (isLight ? "#f1f5f9" : "#1e293b"),
+                                color: isLocked ? theme.colors.accent : theme.colors.textMuted,
                               }}
                             >
-                              Locked
-                            </span>
+                              {isLocked ? <Lock className="w-5 h-5" /> : <Unlock className="w-5 h-5" />}
+                            </div>
                           )}
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5">
+                              <h4 className="text-sm font-semibold truncate" style={{ color: theme.colors.textPrimary }}>
+                                {app.name}
+                              </h4>
+                              {isLocked && (
+                                <span
+                                  className="text-[10px] px-1.5 py-0.5 rounded-full font-medium"
+                                  style={{
+                                    backgroundColor: theme.colors.badgeBg,
+                                    color: theme.colors.badgeText,
+                                  }}
+                                >
+                                  Locked
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-xs truncate font-mono" style={{ color: theme.colors.textMuted }} title={app.bundle_id}>
+                              {app.bundle_id}
+                            </p>
+                          </div>
                         </div>
-                        <p className="text-xs truncate" style={{ color: theme.colors.textMuted }} title={app.bundle_id}>
-                          {app.bundle_id}
-                        </p>
-                      </div>
-                    </div>
 
-                    <button
-                      onClick={() => handleToggleApp(app)}
-                      className="relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none"
-                      style={{
-                        backgroundColor: isLocked ? theme.colors.toggleActive : theme.colors.toggleInactive,
-                      }}
-                    >
-                      <span
-                        className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
-                          isLocked ? "translate-x-5" : "translate-x-0"
-                        }`}
-                      />
-                    </button>
-                  </div>
-                );
-              })}
+                        <button
+                          onClick={() => handleToggleApp(app)}
+                          className="relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none"
+                          style={{
+                            backgroundColor: isLocked ? theme.colors.toggleActive : theme.colors.toggleInactive,
+                          }}
+                        >
+                          <span
+                            className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
+                              isLocked ? "translate-x-5" : "translate-x-0"
+                            }`}
+                          />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
 
@@ -637,11 +1008,14 @@ export default function App() {
             <div className="space-y-6 max-w-4xl">
               <div className="flex items-center justify-between">
                 <div>
-                  <h3 className="text-base font-bold" style={{ color: theme.colors.textPrimary }}>
+                  <h3 className="text-base font-bold flex items-center gap-2" style={{ color: theme.colors.textPrimary }}>
                     Encrypted Folder Vaults
+                    <span className="text-[10px] font-mono px-2 py-0.5 rounded-full font-semibold uppercase bg-indigo-500/10 text-indigo-500 border border-indigo-500/20">
+                      AES-256-GCM
+                    </span>
                   </h3>
                   <p className="text-xs" style={{ color: theme.colors.textSecondary }}>
-                    Folders secured with zero-knowledge AES-256-GCM encryption. Locked folders cannot be viewed without your Master PIN.
+                    Folders secured with zero-knowledge AES-256-GCM authenticated encryption. Shielded from Finder exploration when locked.
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
@@ -703,7 +1077,7 @@ export default function App() {
                     return (
                       <div
                         key={vault.path}
-                        className="p-5 rounded-2xl border transition-all flex flex-col justify-between space-y-4 shadow-xs"
+                        className="p-5 rounded-2xl border transition-all flex flex-col justify-between space-y-4 shadow-xs app-card-interactive"
                         style={{
                           backgroundColor: vault.is_locked ? theme.colors.bgCardLocked : theme.colors.bgCard,
                           borderColor: vault.is_locked ? theme.colors.borderLocked : theme.colors.borderCard,
@@ -712,7 +1086,7 @@ export default function App() {
                         <div className="flex items-start justify-between gap-3">
                           <div className="flex items-center gap-3 min-w-0">
                             <div
-                              className="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0"
+                              className="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0 transition-colors"
                               style={{
                                 backgroundColor: vault.is_locked ? theme.colors.badgeBg : (isLight ? "#f1f5f9" : "#1e293b"),
                                 color: vault.is_locked ? theme.colors.accent : theme.colors.textMuted,
@@ -721,10 +1095,21 @@ export default function App() {
                               {vault.is_locked ? <FolderLock className="w-6 h-6" /> : <HardDrive className="w-6 h-6" />}
                             </div>
                             <div className="min-w-0">
-                              <h4 className="font-semibold text-sm truncate" style={{ color: theme.colors.textPrimary }}>
-                                {vault.name}
-                              </h4>
-                              <p className="text-[11px] truncate font-mono" style={{ color: theme.colors.textMuted }} title={vault.path}>
+                              <div className="flex items-center gap-2">
+                                <h4 className="font-semibold text-sm truncate" style={{ color: theme.colors.textPrimary }}>
+                                  {vault.name}
+                                </h4>
+                                <span
+                                  className={`text-[10px] px-2 py-0.5 rounded-full font-semibold uppercase tracking-wider ${
+                                    vault.is_locked
+                                      ? "bg-red-500/10 text-red-500 border border-red-500/20"
+                                      : "bg-emerald-500/10 text-emerald-500 border border-emerald-500/20"
+                                  }`}
+                                >
+                                  {vault.is_locked ? "Encrypted & Hidden" : "Open"}
+                                </span>
+                              </div>
+                              <p className="text-[11px] truncate font-mono mt-0.5" style={{ color: theme.colors.textMuted }} title={vault.path}>
                                 {vault.path}
                               </p>
                             </div>
@@ -739,10 +1124,10 @@ export default function App() {
                           </button>
                         </div>
 
-                        <div className="flex items-center justify-between text-xs pt-2 border-t" style={{ borderColor: theme.colors.border }}>
-                          <div className="flex items-center gap-3" style={{ color: theme.colors.textSecondary }}>
+                        <div className="flex items-center justify-between text-xs pt-3 border-t" style={{ borderColor: theme.colors.border }}>
+                          <div className="flex items-center gap-3 font-medium" style={{ color: theme.colors.textSecondary }}>
                             <span>{vault.file_count} files</span>
-                            <span>•</span>
+                            <span className="opacity-40">•</span>
                             <span>{formatSize(vault.total_size_bytes)}</span>
                           </div>
 
@@ -948,6 +1333,256 @@ export default function App() {
               </div>
             </div>
           )}
+
+          {/* Settings & Security Preferences Tab */}
+          {activeTab === "settings" && (
+            <div className="p-8 max-w-4xl mx-auto space-y-8 animate-in fade-in duration-200">
+              {/* Header */}
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-xl font-bold tracking-tight" style={{ color: theme.colors.textPrimary }}>
+                    Security & Preferences
+                  </h3>
+                  <p className="text-xs mt-1" style={{ color: theme.colors.textSecondary }}>
+                    Configure hardware defense policies, auto-lock grace intervals, and master credentials.
+                  </p>
+                </div>
+                {settingsSaveFeedback && (
+                  <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 flex items-center gap-1.5 animate-in fade-in">
+                    <Check className="w-3.5 h-3.5" />
+                    <span>Settings Saved</span>
+                  </span>
+                )}
+              </div>
+
+              {/* Section 1: Self-Defense & Dashboard Gate */}
+              <div
+                className="p-6 rounded-2xl border space-y-5"
+                style={{
+                  backgroundColor: theme.colors.bgCard,
+                  borderColor: theme.colors.borderCard,
+                }}
+              >
+                <div className="flex items-center gap-3">
+                  <div
+                    className="w-10 h-10 rounded-xl flex items-center justify-center text-white"
+                    style={{ backgroundColor: theme.colors.accent }}
+                  >
+                    <ShieldCheck className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h4 className="font-bold text-sm" style={{ color: theme.colors.textPrimary }}>
+                      AppGuard Self-Defense
+                    </h4>
+                    <p className="text-xs" style={{ color: theme.colors.textSecondary }}>
+                      Prevent unauthorized modification of your protection rules and vault paths.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="space-y-4 pt-2">
+                  <div className="flex items-center justify-between py-2 border-t" style={{ borderColor: theme.colors.borderCard }}>
+                    <div>
+                      <span className="text-xs font-semibold" style={{ color: theme.colors.textPrimary }}>
+                        Require Authentication to Open AppGuard
+                      </span>
+                      <p className="text-[11px]" style={{ color: theme.colors.textSecondary }}>
+                        Prompts for Touch ID, macOS Password, or Master PIN when opening the app.
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => handleUpdatePreference("app_self_locked", !config?.app_self_locked)}
+                      className="relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none"
+                      style={{
+                        backgroundColor: config?.app_self_locked ? theme.colors.toggleActive : theme.colors.toggleInactive,
+                      }}
+                    >
+                      <span
+                        className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
+                          config?.app_self_locked ? "translate-x-5" : "translate-x-0"
+                        }`}
+                      />
+                    </button>
+                  </div>
+
+                  <div className="flex items-center justify-between py-2 border-t" style={{ borderColor: theme.colors.borderCard }}>
+                    <div>
+                      <span className="text-xs font-semibold" style={{ color: theme.colors.textPrimary }}>
+                        Instant Process Re-lock (Zero Tolerance)
+                      </span>
+                      <p className="text-[11px]" style={{ color: theme.colors.textSecondary }}>
+                        Re-locks protected apps the exact millisecond you switch windows (overrides grace period).
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => handleUpdatePreference("instant_lock_mode", !config?.instant_lock_mode)}
+                      className="relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none"
+                      style={{
+                        backgroundColor: config?.instant_lock_mode ? theme.colors.toggleActive : theme.colors.toggleInactive,
+                      }}
+                    >
+                      <span
+                        className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
+                          config?.instant_lock_mode ? "translate-x-5" : "translate-x-0"
+                        }`}
+                      />
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Section 2: Grace Period & Re-lock Timers */}
+              <div
+                className="p-6 rounded-2xl border space-y-5"
+                style={{
+                  backgroundColor: theme.colors.bgCard,
+                  borderColor: theme.colors.borderCard,
+                }}
+              >
+                <div className="flex items-center gap-3">
+                  <div
+                    className="w-10 h-10 rounded-xl flex items-center justify-center text-white"
+                    style={{ backgroundColor: theme.colors.accent }}
+                  >
+                    <Clock className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h4 className="font-bold text-sm" style={{ color: theme.colors.textPrimary }}>
+                      Session Grace Period
+                    </h4>
+                    <p className="text-xs" style={{ color: theme.colors.textSecondary }}>
+                      How long an app stays unlocked before asking for authentication again.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="space-y-3 pt-2">
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5">
+                    {[
+                      { label: "Immediate (0s)", val: 0 },
+                      { label: "30 Seconds", val: 30 },
+                      { label: "1 Minute", val: 60 },
+                      { label: "5 Minutes", val: 300 },
+                    ].map((item) => {
+                      const isSelected = config?.grace_period_seconds === item.val;
+                      return (
+                        <button
+                          key={item.val}
+                          onClick={() => handleUpdatePreference("grace_period_seconds", item.val)}
+                          className={`p-3 rounded-xl border text-xs font-semibold cursor-pointer transition-all text-center ${
+                            isSelected
+                              ? "shadow-sm border-2"
+                              : "opacity-75 hover:opacity-100"
+                          }`}
+                          style={{
+                            borderColor: isSelected ? theme.colors.accent : theme.colors.border,
+                            backgroundColor: isSelected
+                              ? isLight
+                                ? "#f1f5f9"
+                                : "rgba(255,255,255,0.06)"
+                              : "transparent",
+                            color: isSelected ? theme.colors.accent : theme.colors.textPrimary,
+                          }}
+                        >
+                          {item.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="space-y-4 pt-4 border-t" style={{ borderColor: theme.colors.borderCard }}>
+                  <div className="flex items-center justify-between py-1">
+                    <div>
+                      <span className="text-xs font-semibold" style={{ color: theme.colors.textPrimary }}>
+                        Lock All Apps when Mac Goes to Sleep
+                      </span>
+                      <p className="text-[11px]" style={{ color: theme.colors.textSecondary }}>
+                        Instantly clears all active unlock sessions upon system sleep.
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => handleUpdatePreference("lock_on_sleep", !config?.lock_on_sleep)}
+                      className="relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none"
+                      style={{
+                        backgroundColor: config?.lock_on_sleep ? theme.colors.toggleActive : theme.colors.toggleInactive,
+                      }}
+                    >
+                      <span
+                        className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
+                          config?.lock_on_sleep ? "translate-x-5" : "translate-x-0"
+                        }`}
+                      />
+                    </button>
+                  </div>
+
+                  <div className="flex items-center justify-between py-1 border-t" style={{ borderColor: theme.colors.borderCard }}>
+                    <div>
+                      <span className="text-xs font-semibold" style={{ color: theme.colors.textPrimary }}>
+                        Lock All Apps on Screensaver / Display Lock
+                      </span>
+                      <p className="text-[11px]" style={{ color: theme.colors.textSecondary }}>
+                        Requires re-authentication whenever your screen turns off.
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => handleUpdatePreference("lock_on_screensaver", !config?.lock_on_screensaver)}
+                      className="relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none"
+                      style={{
+                        backgroundColor: config?.lock_on_screensaver ? theme.colors.toggleActive : theme.colors.toggleInactive,
+                      }}
+                    >
+                      <span
+                        className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
+                          config?.lock_on_screensaver ? "translate-x-5" : "translate-x-0"
+                        }`}
+                      />
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Section 3: Master Recovery PIN Management */}
+              <div
+                className="p-6 rounded-2xl border space-y-4"
+                style={{
+                  backgroundColor: theme.colors.bgCard,
+                  borderColor: theme.colors.borderCard,
+                }}
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div
+                      className="w-10 h-10 rounded-xl flex items-center justify-center text-white"
+                      style={{ backgroundColor: theme.colors.accent }}
+                    >
+                      <KeyRound className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h4 className="font-bold text-sm" style={{ color: theme.colors.textPrimary }}>
+                        Master Recovery PIN
+                      </h4>
+                      <p className="text-xs" style={{ color: theme.colors.textSecondary }}>
+                        Your primary fallback secret for unlocking applications and encrypting vaults.
+                      </p>
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={() => setChangePinModalOpen(true)}
+                    className="py-2.5 px-4 rounded-xl text-xs font-semibold cursor-pointer border transition-all hover:opacity-90 shadow-xs"
+                    style={{
+                      borderColor: theme.colors.border,
+                      backgroundColor: isLight ? "#f8fafc" : "rgba(255,255,255,0.04)",
+                      color: theme.colors.accent,
+                    }}
+                  >
+                    Change PIN
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </section>
       </main>
 
@@ -997,8 +1632,16 @@ export default function App() {
                   boxShadow: `0 8px 16px ${theme.colors.accentGlow}`,
                 }}
               >
-                <Fingerprint className="w-5 h-5" />
-                <span>Verify with {biometrics.biometric_type}</span>
+                {biometrics.biometric_type === "SystemPassword" ? (
+                  <KeyRound className="w-5 h-5" />
+                ) : (
+                  <Fingerprint className="w-5 h-5" />
+                )}
+                <span>
+                  {biometrics.biometric_type === "SystemPassword"
+                    ? "Verify with macOS Password"
+                    : `Verify with ${biometrics.biometric_type}`}
+                </span>
               </button>
             )}
 
@@ -1031,17 +1674,26 @@ export default function App() {
               {pinError && (
                 <p className="text-xs text-red-500 font-medium">Incorrect master PIN</p>
               )}
-              <button
-                type="submit"
-                className="w-full py-2.5 rounded-xl text-xs font-semibold transition-all cursor-pointer border"
-                style={{
-                  backgroundColor: isLight ? "#f1f5f9" : "#1e293b",
-                  borderColor: theme.colors.border,
-                  color: theme.colors.textPrimary,
-                }}
-              >
-                Unlock with PIN
-              </button>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={handleCancelLockedTrigger}
+                  className="flex-1 py-2.5 rounded-xl text-xs font-semibold transition-all cursor-pointer border text-red-600 dark:text-red-400 border-red-500/20 bg-red-500/10 hover:bg-red-500/20"
+                >
+                  Cancel & Close App
+                </button>
+                <button
+                  type="submit"
+                  className="flex-1 py-2.5 rounded-xl text-xs font-semibold transition-all cursor-pointer border"
+                  style={{
+                    backgroundColor: isLight ? "#f1f5f9" : "#1e293b",
+                    borderColor: theme.colors.border,
+                    color: theme.colors.textPrimary,
+                  }}
+                >
+                  Unlock with PIN
+                </button>
+              </div>
             </form>
           </div>
         </div>
@@ -1131,6 +1783,627 @@ export default function App() {
                   }}
                 >
                   Save PIN
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* In-app Vault PIN Modal (For Encrypting / Decrypting Folders) */}
+      {vaultPinModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-md flex items-center justify-center p-4">
+          <div
+            className="w-full max-w-sm rounded-2xl border p-6 shadow-2xl space-y-4"
+            style={{
+              backgroundColor: theme.colors.bgModal,
+              borderColor: theme.colors.border,
+            }}
+          >
+            <div className="flex items-center gap-2.5" style={{ color: theme.colors.textPrimary }}>
+              <Lock className="w-5 h-5" style={{ color: theme.colors.accent }} />
+              <h3 className="font-bold">
+                {vaultPinModal.action === "encrypt" ? "Encrypt Folder Vault" : "Decrypt Folder Vault"}
+              </h3>
+            </div>
+            <p className="text-xs" style={{ color: theme.colors.textSecondary }}>
+              Enter Master Recovery PIN to {vaultPinModal.action} <strong>{vaultPinModal.item.name}</strong> with AES-256-GCM.
+            </p>
+
+            <form onSubmit={handleVaultPinSubmit} className="space-y-3">
+              <div>
+                <input
+                  type="password"
+                  maxLength={8}
+                  placeholder="Enter Master PIN"
+                  value={vaultPinModal.pin}
+                  onChange={(e) =>
+                    setVaultPinModal((prev) => prev ? { ...prev, pin: e.target.value, error: "" } : null)
+                  }
+                  className="w-full px-3 py-2 rounded-lg border text-sm focus:outline-none"
+                  style={{
+                    backgroundColor: theme.colors.bgInput,
+                    borderColor: vaultPinModal.error ? "#ef4444" : theme.colors.border,
+                    color: theme.colors.textPrimary,
+                  }}
+                  autoFocus
+                />
+              </div>
+
+              {vaultPinModal.error && (
+                <p className="text-xs text-red-500 font-medium">{vaultPinModal.error}</p>
+              )}
+
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setVaultPinModal(null)}
+                  className="flex-1 py-2 rounded-lg border text-xs font-semibold cursor-pointer"
+                  style={{
+                    backgroundColor: theme.colors.bgInput,
+                    borderColor: theme.colors.border,
+                    color: theme.colors.textSecondary,
+                  }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={!vaultPinModal.pin}
+                  className="flex-1 py-2 rounded-lg text-xs font-semibold text-white shadow-md cursor-pointer disabled:opacity-50"
+                  style={{
+                    backgroundColor: theme.colors.accent,
+                    boxShadow: `0 4px 12px ${theme.colors.accentGlow}`,
+                  }}
+                >
+                  {vaultPinModal.action === "encrypt" ? "Encrypt Now" : "Decrypt Now"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* First-time Setup / 3-Step Onboarding Wizard */}
+      {showWelcomeSetup && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xl flex items-center justify-center p-4">
+          <div
+            className="w-full max-w-lg rounded-2xl border p-8 shadow-2xl space-y-6 text-center"
+            style={{
+              backgroundColor: theme.colors.bgModal,
+              borderColor: theme.colors.border,
+            }}
+          >
+            {/* Step Indicators */}
+            <div className="flex items-center justify-center gap-3">
+              {[1, 2, 3].map((stepNum) => (
+                <div key={stepNum} className="flex items-center gap-2">
+                  <div
+                    className={`w-7 h-7 rounded-full text-xs font-bold flex items-center justify-center transition-all ${
+                      wizardStep === stepNum
+                        ? "text-white shadow-md"
+                        : wizardStep > stepNum
+                        ? "bg-emerald-500 text-white"
+                        : "bg-gray-200 dark:bg-gray-800 text-gray-400"
+                    }`}
+                    style={{
+                      backgroundColor: wizardStep === stepNum ? theme.colors.accent : undefined,
+                    }}
+                  >
+                    {wizardStep > stepNum ? <Check className="w-3.5 h-3.5" /> : stepNum}
+                  </div>
+                  {stepNum < 3 && (
+                    <div
+                      className={`w-8 h-0.5 ${
+                        wizardStep > stepNum ? "bg-emerald-500" : "bg-gray-200 dark:bg-gray-800"
+                      }`}
+                    />
+                  )}
+                </div>
+              ))}
+            </div>
+
+            {/* Step 1: Security & Hardware Detection */}
+            {wizardStep === 1 && (
+              <div className="space-y-5 animate-in fade-in duration-300">
+                <div
+                  className="w-16 h-16 rounded-2xl flex items-center justify-center mx-auto shadow-xl text-white"
+                  style={{
+                    backgroundColor: theme.colors.accent,
+                    boxShadow: `0 12px 24px ${theme.colors.accentGlow}`,
+                  }}
+                >
+                  <Shield className="w-8 h-8" />
+                </div>
+                <div>
+                  <h3 className="text-xl font-bold" style={{ color: theme.colors.textPrimary }}>
+                    Welcome to AppGuard
+                  </h3>
+                  <p className="text-xs mt-1.5" style={{ color: theme.colors.textSecondary }}>
+                    Native hardware privacy shield & biometric protection for macOS
+                  </p>
+                </div>
+
+                <div
+                  className="p-4 rounded-xl border text-left space-y-2 text-xs"
+                  style={{
+                    backgroundColor: theme.colors.bgCard,
+                    borderColor: theme.colors.borderCard,
+                  }}
+                >
+                  <div className="font-semibold text-xs flex items-center justify-between">
+                    <span>Hardware Sensor Status:</span>
+                    <span className="font-mono text-emerald-600 dark:text-emerald-400">
+                      {biometrics?.is_available ? biometrics.biometric_type : "PIN Fallback Mode"}
+                    </span>
+                  </div>
+                  <p className="text-[11px]" style={{ color: theme.colors.textSecondary }}>
+                    {biometrics?.biometric_type === "TouchID" || biometrics?.biometric_type === "FaceID"
+                      ? "Hardware sensor detected. You can instantly unlock protected apps with your fingerprint."
+                      : biometrics?.biometric_type === "SystemPassword"
+                      ? "No dedicated fingerprint scanner detected. AppGuard will seamlessly use your macOS system login password and Master PIN."
+                      : "No biometrics available. AppGuard will secure all applications and vaults using your Master PIN."}
+                  </p>
+                </div>
+
+                <button
+                  onClick={() => setWizardStep(2)}
+                  className="w-full py-3 px-4 rounded-xl font-semibold text-sm flex items-center justify-center gap-2 shadow-lg cursor-pointer hover:opacity-90 text-white"
+                  style={{
+                    backgroundColor: theme.colors.accent,
+                    boxShadow: `0 8px 16px ${theme.colors.accentGlow}`,
+                  }}
+                >
+                  <span>Continue to Step 2</span>
+                </button>
+              </div>
+            )}
+
+            {/* Step 2: Configure Master Recovery PIN */}
+            {wizardStep === 2 && (
+              <div className="space-y-5 animate-in fade-in duration-300">
+                <div
+                  className="w-16 h-16 rounded-2xl flex items-center justify-center mx-auto shadow-xl text-white"
+                  style={{
+                    backgroundColor: theme.colors.accent,
+                    boxShadow: `0 12px 24px ${theme.colors.accentGlow}`,
+                  }}
+                >
+                  <KeyRound className="w-8 h-8" />
+                </div>
+                <div>
+                  <h3 className="text-xl font-bold" style={{ color: theme.colors.textPrimary }}>
+                    Create Master Recovery PIN
+                  </h3>
+                  <p className="text-xs mt-1.5" style={{ color: theme.colors.textSecondary }}>
+                    Used to decrypt vaults and unlock apps whenever biometric verification is unavailable
+                  </p>
+                </div>
+
+                <div className="space-y-3">
+                  <input
+                    type="password"
+                    maxLength={8}
+                    placeholder="Enter 4-8 digit PIN"
+                    value={wizardPin}
+                    onChange={(e) => {
+                      setWizardPin(e.target.value);
+                      setWizardError("");
+                    }}
+                    className="w-full text-center text-xl tracking-[0.4em] py-2.5 rounded-xl border focus:outline-none"
+                    style={{
+                      backgroundColor: theme.colors.bgInput,
+                      borderColor: theme.colors.border,
+                      color: theme.colors.textPrimary,
+                    }}
+                    autoFocus
+                  />
+                  <input
+                    type="password"
+                    maxLength={8}
+                    placeholder="Confirm Master PIN"
+                    value={wizardConfirmPin}
+                    onChange={(e) => {
+                      setWizardConfirmPin(e.target.value);
+                      setWizardError("");
+                    }}
+                    className="w-full text-center text-xl tracking-[0.4em] py-2.5 rounded-xl border focus:outline-none"
+                    style={{
+                      backgroundColor: theme.colors.bgInput,
+                      borderColor: theme.colors.border,
+                      color: theme.colors.textPrimary,
+                    }}
+                  />
+                  {wizardError && (
+                    <p className="text-xs text-red-500 font-medium">{wizardError}</p>
+                  )}
+                </div>
+
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setWizardStep(1)}
+                    className="flex-1 py-3 px-4 rounded-xl font-semibold text-xs cursor-pointer border"
+                    style={{
+                      borderColor: theme.colors.border,
+                      color: theme.colors.textSecondary,
+                    }}
+                  >
+                    Back
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (wizardPin.length < 4) {
+                        setWizardError("PIN must be at least 4 digits");
+                        return;
+                      }
+                      if (wizardPin !== wizardConfirmPin) {
+                        setWizardError("PINs do not match");
+                        return;
+                      }
+                      setWizardStep(3);
+                    }}
+                    className="flex-1 py-3 px-4 rounded-xl font-semibold text-xs shadow-md cursor-pointer text-white"
+                    style={{
+                      backgroundColor: theme.colors.accent,
+                      boxShadow: `0 8px 16px ${theme.colors.accentGlow}`,
+                    }}
+                  >
+                    Next: Shield Apps
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Step 3: Select Initial Protected Apps */}
+            {wizardStep === 3 && (
+              <div className="space-y-5 animate-in fade-in duration-300 text-left">
+                <div className="text-center space-y-1">
+                  <h3 className="text-xl font-bold" style={{ color: theme.colors.textPrimary }}>
+                    Select Apps to Shield
+                  </h3>
+                  <p className="text-xs" style={{ color: theme.colors.textSecondary }}>
+                    Choose commonly protected applications to lock immediately
+                  </p>
+                </div>
+
+                <div
+                  className="max-h-48 overflow-y-auto space-y-1.5 p-2 rounded-xl border"
+                  style={{
+                    backgroundColor: theme.colors.bgCard,
+                    borderColor: theme.colors.borderCard,
+                  }}
+                >
+                  {apps
+                    .filter((a) =>
+                      [
+                        "com.apple.Notes",
+                        "com.apple.MobileSMS",
+                        "com.apple.Photos",
+                        "com.apple.Terminal",
+                        "com.apple.Safari",
+                        "com.apple.mail",
+                        "com.google.Chrome",
+                      ].includes(a.bundle_id)
+                    )
+                    .map((app) => {
+                      const isSelected = wizardSelectedBundles.has(app.bundle_id);
+                      return (
+                        <div
+                          key={app.bundle_id}
+                          onClick={() => {
+                            const next = new Set(wizardSelectedBundles);
+                            if (isSelected) {
+                              next.delete(app.bundle_id);
+                            } else {
+                              next.add(app.bundle_id);
+                            }
+                            setWizardSelectedBundles(next);
+                          }}
+                          className="flex items-center justify-between p-2.5 rounded-lg cursor-pointer transition-all border"
+                          style={{
+                            backgroundColor: isSelected
+                              ? isLight
+                                ? "#f1f5f9"
+                                : "rgba(255,255,255,0.06)"
+                              : "transparent",
+                            borderColor: isSelected ? theme.colors.accent : "transparent",
+                          }}
+                        >
+                          <div className="flex items-center gap-3">
+                            <div className="w-6 h-6 rounded-md bg-gray-100 dark:bg-gray-800 flex items-center justify-center">
+                              {app.icon_base64 ? (
+                                <img
+                                  src={`data:image/png;base64,${app.icon_base64}`}
+                                  alt={app.name}
+                                  className="w-5 h-5 rounded"
+                                />
+                              ) : (
+                                <Shield className="w-3.5 h-3.5 text-gray-500" />
+                              )}
+                            </div>
+                            <span className="text-xs font-semibold" style={{ color: theme.colors.textPrimary }}>
+                              {app.name}
+                            </span>
+                          </div>
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            readOnly
+                            className="rounded accent-emerald-500 cursor-pointer"
+                          />
+                        </div>
+                      );
+                    })}
+                </div>
+
+                {wizardError && (
+                  <p className="text-xs text-red-500 font-medium text-center">{wizardError}</p>
+                )}
+
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setWizardStep(2)}
+                    className="flex-1 py-3 px-4 rounded-xl font-semibold text-xs cursor-pointer border"
+                    style={{
+                      borderColor: theme.colors.border,
+                      color: theme.colors.textSecondary,
+                    }}
+                  >
+                    Back
+                  </button>
+                  <button
+                    onClick={handleFinishWizard}
+                    className="flex-1 py-3 px-4 rounded-xl font-semibold text-xs shadow-md cursor-pointer text-white"
+                    style={{
+                      backgroundColor: theme.colors.accent,
+                      boxShadow: `0 8px 16px ${theme.colors.accentGlow}`,
+                    }}
+                  >
+                    Finish Setup & Activate Shield
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* AppGuard Self-Lock Gate (Prevents unauthorized access to AppGuard itself) */}
+      {isAppLocked && !showWelcomeSetup && (
+        <div
+          className="fixed inset-0 z-50 backdrop-blur-2xl flex items-center justify-center p-4 transition-all"
+          style={{ backgroundColor: theme.colors.bgOverlay }}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl border p-8 shadow-2xl flex flex-col items-center text-center space-y-6"
+            style={{
+              backgroundColor: theme.colors.bgModal,
+              borderColor: theme.colors.border,
+            }}
+          >
+            <div
+              className="w-16 h-16 rounded-2xl flex items-center justify-center shadow-xl text-white"
+              style={{
+                backgroundColor: theme.colors.accent,
+                boxShadow: `0 12px 24px ${theme.colors.accentGlow}`,
+              }}
+            >
+              {selfLockAuthSuccess ? (
+                <CheckCircle2 className="w-8 h-8 text-white animate-bounce" />
+              ) : (
+                <Shield className="w-8 h-8 text-white" />
+              )}
+            </div>
+
+            <div>
+              <h3 className="text-xl font-bold" style={{ color: theme.colors.textPrimary }}>
+                AppGuard is Locked
+              </h3>
+              <p className="text-xs mt-1" style={{ color: theme.colors.textSecondary }}>
+                Authentication required to view or configure application protection
+              </p>
+            </div>
+
+            {biometrics?.is_available && (
+              <button
+                onClick={handleSelfLockBiometric}
+                className="w-full py-3 px-4 rounded-xl font-semibold text-sm flex items-center justify-center gap-2 transition-all shadow-md cursor-pointer hover:opacity-95"
+                style={{
+                  backgroundColor: theme.colors.accent,
+                  color: theme.colors.accentText,
+                  boxShadow: `0 8px 16px ${theme.colors.accentGlow}`,
+                }}
+              >
+                {biometrics.biometric_type === "SystemPassword" ? (
+                  <KeyRound className="w-5 h-5" />
+                ) : (
+                  <Fingerprint className="w-5 h-5" />
+                )}
+                <span>
+                  {biometrics.biometric_type === "SystemPassword"
+                    ? "Unlock with macOS Password"
+                    : `Unlock with ${biometrics.biometric_type}`}
+                </span>
+              </button>
+            )}
+
+            <div className="w-full flex items-center gap-3">
+              <div className="flex-1 h-px" style={{ backgroundColor: theme.colors.border }} />
+              <span className="text-[11px] uppercase tracking-wider font-semibold" style={{ color: theme.colors.textMuted }}>
+                or enter Master PIN
+              </span>
+              <div className="flex-1 h-px" style={{ backgroundColor: theme.colors.border }} />
+            </div>
+
+            <form onSubmit={handleSelfLockPinSubmit} className="w-full space-y-3">
+              <input
+                type="password"
+                maxLength={8}
+                placeholder="••••"
+                value={selfLockPinInput}
+                onChange={(e) => {
+                  setSelfLockPinInput(e.target.value);
+                  setSelfLockPinError(false);
+                }}
+                className="w-full text-center text-2xl tracking-[0.5em] py-2.5 rounded-xl border focus:outline-none"
+                style={{
+                  backgroundColor: theme.colors.bgInput,
+                  borderColor: selfLockPinError ? "#ef4444" : theme.colors.border,
+                  color: theme.colors.textPrimary,
+                }}
+                autoFocus
+              />
+              {selfLockPinError && (
+                <p className="text-xs text-red-500 font-medium">Incorrect master PIN</p>
+              )}
+              <button
+                type="submit"
+                className="w-full py-3 rounded-xl text-xs font-semibold transition-all cursor-pointer shadow-md text-white"
+                style={{
+                  backgroundColor: theme.colors.accent,
+                  boxShadow: `0 8px 16px ${theme.colors.accentGlow}`,
+                }}
+              >
+                Unlock AppGuard
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+      {/* Change Master PIN Modal */}
+      {changePinModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xl flex items-center justify-center p-4">
+          <div
+            className="w-full max-w-md rounded-2xl border p-8 shadow-2xl space-y-6"
+            style={{
+              backgroundColor: theme.colors.bgModal,
+              borderColor: theme.colors.border,
+            }}
+          >
+            <div className="text-center space-y-2">
+              <div
+                className="w-14 h-14 rounded-2xl flex items-center justify-center mx-auto shadow-lg text-white"
+                style={{
+                  backgroundColor: theme.colors.accent,
+                  boxShadow: `0 8px 16px ${theme.colors.accentGlow}`,
+                }}
+              >
+                <KeyRound className="w-7 h-7" />
+              </div>
+              <h3 className="text-lg font-bold" style={{ color: theme.colors.textPrimary }}>
+                Change Master Recovery PIN
+              </h3>
+              <p className="text-xs" style={{ color: theme.colors.textSecondary }}>
+                Enter your current PIN followed by your new 4-8 digit PIN
+              </p>
+            </div>
+
+            <form onSubmit={handleChangeMasterPin} className="space-y-3.5">
+              <div>
+                <label className="text-[11px] font-semibold block mb-1" style={{ color: theme.colors.textSecondary }}>
+                  Current PIN
+                </label>
+                <input
+                  type="password"
+                  maxLength={8}
+                  placeholder="••••"
+                  value={oldPinInput}
+                  onChange={(e) => {
+                    setOldPinInput(e.target.value);
+                    setChangePinError("");
+                  }}
+                  className="w-full text-center text-xl tracking-[0.4em] py-2.5 rounded-xl border focus:outline-none"
+                  style={{
+                    backgroundColor: theme.colors.bgInput,
+                    borderColor: theme.colors.border,
+                    color: theme.colors.textPrimary,
+                  }}
+                  autoFocus
+                />
+              </div>
+
+              <div>
+                <label className="text-[11px] font-semibold block mb-1" style={{ color: theme.colors.textSecondary }}>
+                  New Master PIN
+                </label>
+                <input
+                  type="password"
+                  maxLength={8}
+                  placeholder="••••"
+                  value={newChangePinInput}
+                  onChange={(e) => {
+                    setNewChangePinInput(e.target.value);
+                    setChangePinError("");
+                  }}
+                  className="w-full text-center text-xl tracking-[0.4em] py-2.5 rounded-xl border focus:outline-none"
+                  style={{
+                    backgroundColor: theme.colors.bgInput,
+                    borderColor: theme.colors.border,
+                    color: theme.colors.textPrimary,
+                  }}
+                />
+              </div>
+
+              <div>
+                <label className="text-[11px] font-semibold block mb-1" style={{ color: theme.colors.textSecondary }}>
+                  Confirm New PIN
+                </label>
+                <input
+                  type="password"
+                  maxLength={8}
+                  placeholder="••••"
+                  value={confirmChangePinInput}
+                  onChange={(e) => {
+                    setConfirmChangePinInput(e.target.value);
+                    setChangePinError("");
+                  }}
+                  className="w-full text-center text-xl tracking-[0.4em] py-2.5 rounded-xl border focus:outline-none"
+                  style={{
+                    backgroundColor: theme.colors.bgInput,
+                    borderColor: theme.colors.border,
+                    color: theme.colors.textPrimary,
+                  }}
+                />
+              </div>
+
+              {changePinError && (
+                <p className="text-xs text-red-500 font-medium text-center">{changePinError}</p>
+              )}
+
+              {changePinSuccess && (
+                <p className="text-xs text-emerald-500 font-semibold text-center flex items-center justify-center gap-1">
+                  <Check className="w-3.5 h-3.5" />
+                  <span>PIN successfully updated!</span>
+                </p>
+              )}
+
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setChangePinModalOpen(false);
+                    setChangePinError("");
+                    setOldPinInput("");
+                    setNewChangePinInput("");
+                    setConfirmChangePinInput("");
+                  }}
+                  className="flex-1 py-2.5 rounded-xl text-xs font-semibold cursor-pointer border"
+                  style={{
+                    borderColor: theme.colors.border,
+                    color: theme.colors.textSecondary,
+                  }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="flex-1 py-2.5 rounded-xl text-xs font-semibold shadow-md cursor-pointer text-white"
+                  style={{
+                    backgroundColor: theme.colors.accent,
+                    boxShadow: `0 8px 16px ${theme.colors.accentGlow}`,
+                  }}
+                >
+                  Save New PIN
                 </button>
               </div>
             </form>

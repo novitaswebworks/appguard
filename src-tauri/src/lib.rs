@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod platform;
 pub mod scanner;
 pub mod state;
 pub mod vault;
@@ -8,7 +9,7 @@ use auth::BiometricStatus;
 use scanner::ScannedApp;
 use state::{AppGuardConfig, AppRule, SecurityManager};
 use std::sync::Arc;
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 use vault::VaultItem;
 
 // ----------------- IPC Tauri Commands -----------------
@@ -35,7 +36,62 @@ fn set_master_pin(pin: String, security: State<'_, Arc<SecurityManager>>) -> Res
 
 #[tauri::command]
 fn verify_pin(pin: String, security: State<'_, Arc<SecurityManager>>) -> bool {
-    security.verify_master_pin(&pin)
+    let valid = security.verify_master_pin(&pin);
+    if valid {
+        security.set_app_authenticated(true);
+    }
+    valid
+}
+
+#[tauri::command]
+fn is_app_authenticated(security: State<'_, Arc<SecurityManager>>) -> bool {
+    security.is_app_authenticated()
+}
+
+#[tauri::command]
+fn unlock_appguard(security: State<'_, Arc<SecurityManager>>) -> bool {
+    security.set_app_authenticated(true);
+    true
+}
+
+#[tauri::command]
+fn lock_appguard(security: State<'_, Arc<SecurityManager>>) -> bool {
+    security.set_app_authenticated(false);
+    true
+}
+
+#[tauri::command]
+fn update_preferences(
+    grace_period_seconds: u64,
+    app_self_locked: bool,
+    lock_on_sleep: bool,
+    lock_on_screensaver: bool,
+    instant_lock_mode: bool,
+    stealth_mode: bool,
+    security: State<'_, Arc<SecurityManager>>,
+) -> Result<bool, String> {
+    security
+        .update_preferences(
+            grace_period_seconds,
+            app_self_locked,
+            lock_on_sleep,
+            lock_on_screensaver,
+            instant_lock_mode,
+            stealth_mode,
+        )
+        .map(|_| true)
+}
+
+#[tauri::command]
+fn change_master_pin(
+    old_pin: String,
+    new_pin: String,
+    security: State<'_, Arc<SecurityManager>>,
+) -> Result<bool, String> {
+    if !security.verify_master_pin(&old_pin) {
+        return Err("Current PIN is incorrect".into());
+    }
+    security.set_master_pin(&new_pin).map(|_| true)
 }
 
 #[tauri::command]
@@ -59,6 +115,36 @@ fn unlock_app_session(
 ) -> Result<bool, String> {
     security.mark_app_unlocked(&bundle_id);
 
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::msg_send;
+        use objc2::runtime::AnyClass;
+        use objc2_foundation::NSString;
+        unsafe {
+            if let Some(ns_workspace_cls) = AnyClass::get(c"NSWorkspace") {
+                let shared_workspace: *mut objc2::runtime::AnyObject =
+                    msg_send![ns_workspace_cls, sharedWorkspace];
+                if !shared_workspace.is_null() {
+                    let running_apps: *mut objc2_foundation::NSArray<objc2::runtime::AnyObject> =
+                        msg_send![shared_workspace, runningApplications];
+                    if !running_apps.is_null() {
+                        let count: usize = msg_send![running_apps, count];
+                        for i in 0..count {
+                            let app: *mut objc2::runtime::AnyObject =
+                                msg_send![running_apps, objectAtIndex: i];
+                            let bid: *mut NSString = msg_send![app, bundleIdentifier];
+                            if !bid.is_null() && (*bid).to_string() == bundle_id {
+                                let _: () = msg_send![app, unhide];
+                                let _: () = msg_send![app, activateWithOptions: 1usize << 1]; // NSApplicationActivateIgnoringOtherApps
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Release always-on-top and hide AppGuard window so focus returns to the unlocked app
     if let Some(window) = app_handle.get_webview_window("main") {
         let _ = window.set_always_on_top(false);
@@ -67,10 +153,84 @@ fn unlock_app_session(
     Ok(true)
 }
 
-#[tauri::command]
-fn lock_all_sessions(security: State<'_, Arc<SecurityManager>>) -> bool {
+pub fn enforce_lock_all(security: &SecurityManager) {
     security.lock_all();
+
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::msg_send;
+        use objc2::runtime::AnyClass;
+        use objc2_foundation::NSString;
+        unsafe {
+            if let Some(ns_workspace_cls) = AnyClass::get(c"NSWorkspace") {
+                let shared_workspace: *mut objc2::runtime::AnyObject =
+                    msg_send![ns_workspace_cls, sharedWorkspace];
+                if !shared_workspace.is_null() {
+                    let running_apps: *mut objc2_foundation::NSArray<objc2::runtime::AnyObject> =
+                        msg_send![shared_workspace, runningApplications];
+                    if !running_apps.is_null() {
+                        let count: usize = msg_send![running_apps, count];
+                        for i in 0..count {
+                            let app: *mut objc2::runtime::AnyObject =
+                                msg_send![running_apps, objectAtIndex: i];
+                            let bid: *mut NSString = msg_send![app, bundleIdentifier];
+                            if !bid.is_null() {
+                                let b_str = (*bid).to_string();
+                                if security.is_app_locked(&b_str) {
+                                    let _: () = msg_send![app, hide];
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[tauri::command]
+fn lock_all_sessions(
+    app_handle: tauri::AppHandle,
+    security: State<'_, Arc<SecurityManager>>,
+) -> bool {
+    enforce_lock_all(&security);
+    let _ = app_handle.emit("sessions-locked", ());
     true
+}
+
+#[tauri::command]
+fn close_locked_application(bundle_id: String) -> Result<bool, String> {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::msg_send;
+        use objc2::runtime::AnyClass;
+        use objc2_foundation::NSString;
+        unsafe {
+            if let Some(ns_workspace_cls) = AnyClass::get(c"NSWorkspace") {
+                let shared_workspace: *mut objc2::runtime::AnyObject =
+                    msg_send![ns_workspace_cls, sharedWorkspace];
+                if !shared_workspace.is_null() {
+                    let running_apps: *mut objc2_foundation::NSArray<objc2::runtime::AnyObject> =
+                        msg_send![shared_workspace, runningApplications];
+                    if !running_apps.is_null() {
+                        let count: usize = msg_send![running_apps, count];
+                        for i in 0..count {
+                            let app: *mut objc2::runtime::AnyObject =
+                                msg_send![running_apps, objectAtIndex: i];
+                            let bid: *mut NSString = msg_send![app, bundleIdentifier];
+                            if !bid.is_null() && (*bid).to_string() == bundle_id {
+                                // Force hide and terminate the unauthorized app
+                                let _: () = msg_send![app, hide];
+                                let _: bool = msg_send![app, terminate];
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(true)
 }
 
 #[tauri::command]
@@ -175,9 +335,20 @@ pub fn run() {
             let menu = Menu::with_items(app, &[&status_i, &show_i, &lock_i, &prefs_i, &quit_i])?;
 
             let tray_handle = handle.clone();
-            let _tray = TrayIconBuilder::new()
+            let mut tray_builder = TrayIconBuilder::new()
                 .menu(&menu)
-                .tooltip("AppGuard — Biometric Privacy Shield")
+                .tooltip("AppGuard — Biometric Privacy Shield");
+
+            // Explicitly load macOS template icon (vector lock shield) for the menu bar
+            let icon_bytes = include_bytes!("../icons/tray-template.png");
+            if let Ok(img) = image::load_from_memory(icon_bytes) {
+                let rgba = img.to_rgba8();
+                let (width, height) = rgba.dimensions();
+                let icon = tauri::image::Image::new_owned(rgba.into_raw(), width, height);
+                tray_builder = tray_builder.icon(icon).icon_as_template(true);
+            }
+
+            let _tray = tray_builder
                 .on_menu_event(move |_app, event| {
                     match event.id.as_ref() {
                         "show" | "prefs" => {
@@ -188,10 +359,17 @@ pub fn run() {
                             }
                         }
                         "lock_all" => {
-                            tray_security.lock_all();
+                            enforce_lock_all(&tray_security);
                         }
                         "quit" => {
-                            std::process::exit(0);
+                            // Security Gate: Ensure unauthorized individuals cannot terminate AppGuard
+                            std::thread::spawn(|| {
+                                if let Ok(success) = auth::authenticate("Authenticate to Quit AppGuard") {
+                                    if success {
+                                        std::process::exit(0);
+                                    }
+                                }
+                            });
                         }
                         _ => {}
                     }
@@ -208,11 +386,17 @@ pub fn run() {
             is_pin_configured,
             set_master_pin,
             verify_pin,
+            is_app_authenticated,
+            unlock_appguard,
+            lock_appguard,
+            update_preferences,
+            change_master_pin,
             get_config,
             toggle_lock_app,
             unlock_app_session,
             lock_all_sessions,
             get_installed_apps,
+            close_locked_application,
             inspect_folder_vaults,
             add_folder_to_vault,
             remove_folder_from_vault,
