@@ -15,7 +15,7 @@ jobs:
       matrix:
         include:
           - platform: 'macos-latest'
-            args: '--bundles app,dmg'
+            args: '--bundles app,dmg --target universal-apple-darwin'
           - platform: 'ubuntu-22.04'
             args: '--bundles deb,appimage'
           - platform: 'windows-latest'
@@ -38,6 +38,8 @@ jobs:
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       - name: Install Linux system dependencies
         if: matrix.platform == 'ubuntu-22.04'
@@ -55,7 +57,8 @@ jobs:
         with:
           tagName: v__VERSION__
           releaseName: 'AppGuard v__VERSION__'
-          releaseBody: 'AppGuard v__VERSION__ - Native Biometric Lock & Privacy Vault for Apps and Folders across macOS, Windows, and Linux.'
+          releaseBody: 'AppGuard v__VERSION__ - Native Biometric Lock & Privacy Vault for Apps and Folders across macOS (Universal Binary: Apple Silicon + Intel), Windows, and Linux.'
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
+
