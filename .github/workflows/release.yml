@@ -62,3 +62,30 @@ jobs:
           prerelease: false
           args: ${{ matrix.args }}
 
+  notify-homebrew:
+    needs: release-tauri
+    runs-on: ubuntu-latest
+    steps:
+      - name: Extract version
+        id: meta
+        run: |
+          TAG="${{ github.ref_name }}"
+          VERSION="${TAG#v}"
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch appguard-released to homebrew-tap repo
+        run: |
+          curl -s -X POST \
+            -H "Authorization: Bearer ${{ secrets.HOMEBREW_TAP_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            "https://api.github.com/repos/${{ github.repository_owner }}/homebrew-tap/dispatches" \
+            --data '{
+              "event_type": "appguard-released",
+              "client_payload": {
+                "app": "appguard",
+                "version": "${{ steps.meta.outputs.VERSION }}"
+              }
+            }'
+          echo "Dispatched appguard-released v${{ steps.meta.outputs.VERSION }} to homebrew-tap"
+
