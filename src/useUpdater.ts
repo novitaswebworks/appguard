@@ -3,7 +3,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 
 const GITHUB_REPO = "novitaswebworks/appguard";
 const LATEST_RELEASE_API = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`;
-const CURRENT_VERSION = "0.4.0";
+const CURRENT_VERSION = "0.5.0";
 const LAST_CHECK_KEY = "appguard:updater:last_check";
 const CHECK_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 

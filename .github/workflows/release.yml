@@ -62,21 +62,57 @@ jobs:
           prerelease: false
           args: ${{ matrix.args }}
 
-  notify-homebrew:
+  notify-downstream:
     needs: release-tauri
     runs-on: ubuntu-latest
     steps:
       - name: Extract version
         id: meta
         run: |
-          TAG="${{ github.ref_name }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.4.0")
+          else
+            TAG="${{ github.ref_name }}"
+          fi
           VERSION="${TAG#v}"
           echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Dispatch appguard-released to homebrew-tap repo
+      - name: Dispatch appguard-released to landing page repo
+        env:
+          TOKEN: ${{ secrets.LANDING_PAGE_TOKEN || secrets.HOMEBREW_TAP_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
-          curl -s -X POST \
-            -H "Authorization: Bearer ${{ secrets.HOMEBREW_TAP_TOKEN }}" \
+          if [ -z "$TOKEN" ]; then
+            echo "Skipping landing page dispatch: No auth token available."
+            exit 0
+          fi
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            "https://api.github.com/repos/${{ github.repository_owner }}/appguard-landingpage/dispatches" \
+            --data '{
+              "event_type": "appguard-released",
+              "client_payload": {
+                "app": "appguard",
+                "version": "${{ steps.meta.outputs.VERSION }}"
+              }
+            }')
+          if [ "$STATUS" = "204" ]; then
+            echo "Successfully dispatched appguard-released v${{ steps.meta.outputs.VERSION }} to appguard-landingpage"
+          else
+            echo "Warning: Dispatch to appguard-landingpage returned HTTP $STATUS (Verify repo exists and token has contents:write permission)"
+          fi
+
+      - name: Dispatch appguard-released to homebrew-tap repo
+        env:
+          TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "Skipping homebrew dispatch: HOMEBREW_TAP_TOKEN secret is not set."
+            exit 0
+          fi
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer $TOKEN" \
             -H "Accept: application/vnd.github+json" \
             -H "Content-Type: application/json" \
             "https://api.github.com/repos/${{ github.repository_owner }}/homebrew-tap/dispatches" \
@@ -86,6 +122,10 @@ jobs:
                 "app": "appguard",
                 "version": "${{ steps.meta.outputs.VERSION }}"
               }
-            }'
-          echo "Dispatched appguard-released v${{ steps.meta.outputs.VERSION }} to homebrew-tap"
+            }')
+          if [ "$STATUS" = "204" ]; then
+            echo "Successfully dispatched appguard-released v${{ steps.meta.outputs.VERSION }} to homebrew-tap"
+          else
+            echo "Warning: Dispatch to homebrew-tap returned HTTP $STATUS"
+          fi
 
