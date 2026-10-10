@@ -68,6 +68,7 @@ fn update_preferences(
     lock_on_screensaver: bool,
     instant_lock_mode: bool,
     stealth_mode: bool,
+    tamper_protection_enabled: bool,
     security: State<'_, Arc<SecurityManager>>,
 ) -> Result<bool, String> {
     security
@@ -78,8 +79,32 @@ fn update_preferences(
             lock_on_screensaver,
             instant_lock_mode,
             stealth_mode,
+            tamper_protection_enabled,
         )
         .map(|_| true)
+}
+
+#[tauri::command]
+fn set_tamper_protection(
+    enabled: bool,
+    security: State<'_, Arc<SecurityManager>>,
+) -> Result<bool, String> {
+    let platform = platform::get_platform();
+    if enabled {
+        let exe_path = std::env::current_exe()
+            .map_err(|e| e.to_string())?
+            .to_string_lossy()
+            .to_string();
+        platform.enable_tamper_protection(&exe_path)?;
+    } else {
+        platform.disable_tamper_protection()?;
+    }
+
+    let mut cfg = security.config.write();
+    cfg.tamper_protection_enabled = enabled;
+    drop(cfg);
+    security.save()?;
+    Ok(true)
 }
 
 #[tauri::command]
@@ -400,6 +425,7 @@ pub fn run() {
             unlock_appguard,
             lock_appguard,
             update_preferences,
+            set_tamper_protection,
             change_master_pin,
             get_config,
             toggle_lock_app,

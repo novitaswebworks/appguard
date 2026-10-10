@@ -231,4 +231,80 @@ impl PlatformOps for MacPlatformOps {
         let _ = Command::new("chflags").arg("nohidden").arg(folder_path).status();
         Ok(())
     }
+
+    fn enable_tamper_protection(&self, app_path: &str) -> Result<(), String> {
+        // Registers a launchd User Agent (~/Library/LaunchAgents/com.appguard.watchdog.plist) with KeepAlive = true
+        let home = std::env::var("HOME").map_err(|e| e.to_string())?;
+        let launch_agents_dir = std::path::PathBuf::from(home).join("Library").join("LaunchAgents");
+        let _ = std::fs::create_dir_all(&launch_agents_dir);
+        let plist_path = launch_agents_dir.join("com.appguard.watchdog.plist");
+
+        // Binary inside app bundle or standalone executable
+        let exec_path = if app_path.ends_with(".app") {
+            format!("{app_path}/Contents/MacOS/appguard")
+        } else if app_path.contains("/Contents/MacOS/") {
+            app_path.to_string()
+        } else if std::path::Path::new("/Applications/AppGuard.app/Contents/MacOS/appguard").exists() {
+            "/Applications/AppGuard.app/Contents/MacOS/appguard".to_string()
+        } else {
+            app_path.to_string()
+        };
+
+        let plist_content = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.appguard.watchdog</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{}</string>
+        <string>--minimized</string>
+    </array>
+    <key>KeepAlive</key>
+    <true/>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+</dict>
+</plist>"#,
+            exec_path
+        );
+
+        std::fs::write(&plist_path, plist_content).map_err(|e| e.to_string())?;
+
+        // Unload first if previously loaded, then load
+        let _ = Command::new("launchctl")
+            .args(["unload", &plist_path.to_string_lossy()])
+            .status();
+
+        let status = Command::new("launchctl")
+            .args(["load", "-w", &plist_path.to_string_lossy()])
+            .status()
+            .map_err(|e| e.to_string())?;
+
+        if status.success() {
+            Ok(())
+        } else {
+            Err("Failed to register launchd watchdog agent".into())
+        }
+    }
+
+    fn disable_tamper_protection(&self) -> Result<(), String> {
+        let home = std::env::var("HOME").map_err(|e| e.to_string())?;
+        let plist_path = std::path::PathBuf::from(home)
+            .join("Library")
+            .join("LaunchAgents")
+            .join("com.appguard.watchdog.plist");
+
+        if plist_path.exists() {
+            let _ = Command::new("launchctl")
+                .args(["unload", "-w", &plist_path.to_string_lossy()])
+                .status();
+            let _ = std::fs::remove_file(plist_path);
+        }
+        Ok(())
+    }
 }

@@ -130,4 +130,72 @@ impl PlatformOps for LinuxPlatformOps {
             .status();
         Ok(())
     }
+
+    fn enable_tamper_protection(&self, app_path: &str) -> Result<(), String> {
+        // Creates a systemd user service (~/.config/systemd/user/appguard.service) with Restart=always
+        let home = std::env::var("HOME").map_err(|e| e.to_string())?;
+        let user_service_dir = std::path::PathBuf::from(home)
+            .join(".config")
+            .join("systemd")
+            .join("user");
+        let _ = std::fs::create_dir_all(&user_service_dir);
+        let service_path = user_service_dir.join("appguard.service");
+
+        let service_content = format!(
+            r#"[Unit]
+Description=AppGuard Tamper-Proof Watchdog Supervisor
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart={} --minimized
+Restart=always
+RestartSec=1
+KillMode=process
+
+[Install]
+WantedBy=default.target
+"#,
+            app_path
+        );
+
+        std::fs::write(&service_path, service_content).map_err(|e| e.to_string())?;
+
+        // Reload systemd user daemon and enable + start the service
+        let _ = Command::new("systemctl")
+            .args(["--user", "daemon-reload"])
+            .status();
+
+        let status = Command::new("systemctl")
+            .args(["--user", "enable", "--now", "appguard.service"])
+            .status()
+            .map_err(|e| e.to_string())?;
+
+        if status.success() {
+            Ok(())
+        } else {
+            Err("Failed to activate systemd watchdog service".into())
+        }
+    }
+
+    fn disable_tamper_protection(&self) -> Result<(), String> {
+        let _ = Command::new("systemctl")
+            .args(["--user", "disable", "--now", "appguard.service"])
+            .status();
+
+        let home = std::env::var("HOME").map_err(|e| e.to_string())?;
+        let service_path = std::path::PathBuf::from(home)
+            .join(".config")
+            .join("systemd")
+            .join("user")
+            .join("appguard.service");
+
+        if service_path.exists() {
+            let _ = std::fs::remove_file(service_path);
+            let _ = Command::new("systemctl")
+                .args(["--user", "daemon-reload"])
+                .status();
+        }
+        Ok(())
+    }
 }

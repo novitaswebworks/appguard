@@ -30,6 +30,8 @@ pub struct AppGuardConfig {
     pub lock_on_screensaver: bool,
     #[serde(default = "default_false")]
     pub instant_lock_mode: bool, // Zero-tolerance lock immediately on process focus change
+    #[serde(default = "default_false")]
+    pub tamper_protection_enabled: bool, // Cross-platform auto-resurrect OS watchdog
 }
 
 fn default_true() -> bool {
@@ -52,6 +54,7 @@ impl Default for AppGuardConfig {
             lock_on_sleep: true,
             lock_on_screensaver: true,
             instant_lock_mode: false,
+            tamper_protection_enabled: false,
         }
     }
 }
@@ -175,6 +178,7 @@ impl SecurityManager {
         lock_on_screensaver: bool,
         instant_lock_mode: bool,
         stealth_mode: bool,
+        tamper_protection_enabled: bool,
     ) -> Result<(), String> {
         let mut cfg = self.config.write();
         cfg.grace_period_seconds = grace_period_seconds;
@@ -183,6 +187,7 @@ impl SecurityManager {
         cfg.lock_on_screensaver = lock_on_screensaver;
         cfg.instant_lock_mode = instant_lock_mode;
         cfg.stealth_mode = stealth_mode;
+        cfg.tamper_protection_enabled = tamper_protection_enabled;
         drop(cfg);
         self.save()
     }

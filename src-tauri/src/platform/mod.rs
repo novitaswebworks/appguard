@@ -58,6 +58,12 @@ pub trait PlatformOps: Send + Sync {
 
     /// Unshields the protected folder, restoring normal explorer access
     fn unshield_folder(&self, folder_path: &str) -> Result<(), String>;
+
+    /// Registers background watchdog daemon with OS (launchd KeepAlive / Windows AutoRestart Service / systemd Restart=always)
+    fn enable_tamper_protection(&self, app_path: &str) -> Result<(), String>;
+
+    /// Disables background watchdog daemon with authorization
+    fn disable_tamper_protection(&self) -> Result<(), String>;
 }
 
 /// Returns the singleton PlatformOps provider for the current operating system

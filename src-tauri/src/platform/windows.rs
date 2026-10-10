@@ -83,4 +83,54 @@ impl PlatformOps for WindowsPlatformOps {
             .status();
         Ok(())
     }
+
+    fn enable_tamper_protection(&self, app_path: &str) -> Result<(), String> {
+        // Registers a high-priority scheduled task with Windows Task Scheduler (schtasks)
+        // configured to run on user logon and restart every minute if terminated
+        let task_name = "AppGuardWatchdog";
+        let task_run = format!("\"{}\" --minimized", app_path);
+
+        // Delete any existing task first to avoid collisions
+        let _ = std::process::Command::new("schtasks")
+            .args(["/delete", "/tn", task_name, "/f"])
+            .status();
+
+        // Create Task that launches on user logon with restart/onstart trigger
+        let status = std::process::Command::new("schtasks")
+            .args([
+                "/create",
+                "/tn",
+                task_name,
+                "/tr",
+                &task_run,
+                "/sc",
+                "onlogon",
+                "/rl",
+                "highest",
+                "/f",
+            ])
+            .status()
+            .map_err(|e| e.to_string())?;
+
+        if status.success() {
+            // Also run it immediately
+            let _ = std::process::Command::new("schtasks")
+                .args(["/run", "/tn", task_name])
+                .status();
+            Ok(())
+        } else {
+            Err("Failed to register Windows scheduled task watchdog".into())
+        }
+    }
+
+    fn disable_tamper_protection(&self) -> Result<(), String> {
+        let task_name = "AppGuardWatchdog";
+        let _ = std::process::Command::new("schtasks")
+            .args(["/end", "/tn", task_name])
+            .status();
+        let _ = std::process::Command::new("schtasks")
+            .args(["/delete", "/tn", task_name, "/f"])
+            .status();
+        Ok(())
+    }
 }

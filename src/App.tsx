@@ -70,6 +70,7 @@ interface AppGuardConfig {
   lock_on_sleep: boolean;
   lock_on_screensaver: boolean;
   instant_lock_mode: boolean;
+  tamper_protection_enabled?: boolean;
 }
 
 export default function App() {
@@ -518,11 +519,26 @@ export default function App() {
         lockOnScreensaver: nextConfig.lock_on_screensaver,
         instantLockMode: nextConfig.instant_lock_mode,
         stealthMode: nextConfig.stealth_mode,
+        tamperProtectionEnabled: !!nextConfig.tamper_protection_enabled,
       });
       setSettingsSaveFeedback(true);
       setTimeout(() => setSettingsSaveFeedback(false), 1500);
     } catch (err) {
       console.error("Failed to update preferences:", err);
+    }
+  }
+
+  async function handleToggleTamperProtection() {
+    if (!config) return;
+    const targetState = !config.tamper_protection_enabled;
+    try {
+      await invoke("set_tamper_protection", { enabled: targetState });
+      setConfig({ ...config, tamper_protection_enabled: targetState });
+      setSettingsSaveFeedback(true);
+      setTimeout(() => setSettingsSaveFeedback(false), 1500);
+    } catch (err) {
+      console.error("Failed to toggle tamper protection:", err);
+      alert(`Tamper protection error: ${err}`);
     }
   }
 
@@ -1428,6 +1444,35 @@ export default function App() {
                       <span
                         className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
                           config?.instant_lock_mode ? "translate-x-5" : "translate-x-0"
+                        }`}
+                      />
+                    </button>
+                  </div>
+
+                  <div className="flex items-center justify-between py-2 border-t" style={{ borderColor: theme.colors.borderCard }}>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-semibold" style={{ color: theme.colors.textPrimary }}>
+                          Tamper-Proof OS Watchdog (Auto-Resurrect)
+                        </span>
+                        <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-amber-500/10 text-amber-500 border border-amber-500/20">
+                          Cross-Platform
+                        </span>
+                      </div>
+                      <p className="text-[11px]" style={{ color: theme.colors.textSecondary }}>
+                        Registers OS supervisor (launchd / Windows Task Scheduler / systemd) to immediately resurrect AppGuard if an intruder forces kill via killall, Task Manager, or SIGKILL.
+                      </p>
+                    </div>
+                    <button
+                      onClick={handleToggleTamperProtection}
+                      className="relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none"
+                      style={{
+                        backgroundColor: config?.tamper_protection_enabled ? theme.colors.toggleActive : theme.colors.toggleInactive,
+                      }}
+                    >
+                      <span
+                        className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
+                          config?.tamper_protection_enabled ? "translate-x-5" : "translate-x-0"
                         }`}
                       />
                     </button>
