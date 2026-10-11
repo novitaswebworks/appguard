@@ -1,10 +1,7 @@
 use crate::state::SecurityManager;
 use std::sync::Arc;
-use tauri::AppHandle;
-#[cfg(target_os = "macos")]
 use std::time::Duration;
-#[cfg(target_os = "macos")]
-use tauri::{Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 #[cfg(target_os = "macos")]
 pub fn start_focus_watchdog(app_handle: AppHandle, security: Arc<SecurityManager>) {
@@ -100,7 +97,132 @@ pub fn start_focus_watchdog(app_handle: AppHandle, security: Arc<SecurityManager
     });
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+pub fn start_focus_watchdog(app_handle: AppHandle, security: Arc<SecurityManager>) {
+    use std::process::Command;
+
+    std::thread::spawn(move || {
+        let mut last_app = String::new();
+
+        loop {
+            std::thread::sleep(Duration::from_millis(250));
+
+            // Probe active window title/class via xdotool
+            let output = Command::new("xdotool")
+                .args(["getwindowfocus", "getwindowname"])
+                .output();
+
+            if let Ok(out) = output {
+                if out.status.success() {
+                    let current_name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    if current_name.is_empty() || current_name.to_lowercase().contains("appguard") {
+                        continue;
+                    }
+
+                    if current_name != last_app {
+                        last_app = current_name.clone();
+
+                        // Check if any locked app rule matches this title or binary
+                        let is_locked = {
+                            let cfg = security.config.read();
+                            cfg.locked_apps.values().any(|r| {
+                                r.is_locked
+                                    && (current_name.contains(&r.name)
+                                        || current_name.contains(&r.bundle_id))
+                            })
+                        };
+
+                        if is_locked {
+                            // Minimize unauthorized window
+                            let _ = Command::new("xdotool")
+                                .args(["getwindowfocus", "windowminimize"])
+                                .status();
+
+                            let _ = app_handle.emit(
+                                "app-locked-triggered",
+                                serde_json::json!({
+                                    "bundle_id": current_name,
+                                    "name": current_name,
+                                }),
+                            );
+
+                            let target_window = app_handle
+                                .get_webview_window("auth")
+                                .or_else(|| app_handle.get_webview_window("main"));
+
+                            if let Some(window) = target_window {
+                                let _ = window.show();
+                                let _ = window.unminimize();
+                                let _ = window.set_always_on_top(true);
+                                let _ = window.set_focus();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+
+#[cfg(target_os = "windows")]
+pub fn start_focus_watchdog(app_handle: AppHandle, security: Arc<SecurityManager>) {
+    // Windows focus loop querying active foreground window
+    std::thread::spawn(move || {
+        let mut last_title = String::new();
+
+        loop {
+            std::thread::sleep(Duration::from_millis(250));
+
+            // On Windows, users can query active foreground window via powershell / tasklist
+            // or native Windows hook when winapi/windows crate is linked
+            let output = std::process::Command::new("powershell")
+                .args([
+                    "-NoProfile",
+                    "-Command",
+                    "(Get-Process | Where-Object { $_.MainWindowHandle -eq (Add-Type '[DllImport(\"user32.dll\")] public static extern IntPtr GetForegroundWindow();' -Name W -PassThru)::GetForegroundWindow() }).ProcessName",
+                ])
+                .output();
+
+            if let Ok(out) = output {
+                if out.status.success() {
+                    let proc_name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    let exe_bundle = format!("{}.exe", proc_name.to_lowercase());
+
+                    if proc_name.is_empty() || proc_name.to_lowercase().contains("appguard") {
+                        continue;
+                    }
+
+                    if exe_bundle != last_title {
+                        last_title = exe_bundle.clone();
+
+                        if security.is_app_locked(&exe_bundle) {
+                            let _ = app_handle.emit(
+                                "app-locked-triggered",
+                                serde_json::json!({
+                                    "bundle_id": exe_bundle,
+                                    "name": proc_name,
+                                }),
+                            );
+
+                            let target_window = app_handle
+                                .get_webview_window("auth")
+                                .or_else(|| app_handle.get_webview_window("main"));
+
+                            if let Some(window) = target_window {
+                                let _ = window.show();
+                                let _ = window.unminimize();
+                                let _ = window.set_always_on_top(true);
+                                let _ = window.set_focus();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 pub fn start_focus_watchdog(_app_handle: AppHandle, _security: Arc<SecurityManager>) {
-    // Windows/Linux focus hook
+    // Unsupported platform stub
 }

@@ -1,7 +1,8 @@
-export type ThemeMode = "nordic" | "editorial" | "rose" | "emerald" | "amber" | "slate" | "obsidian";
+export type ConcreteThemeMode = "nordic" | "editorial" | "rose" | "emerald" | "amber" | "slate" | "obsidian";
+export type ThemeMode = "system" | ConcreteThemeMode;
 
 export interface ThemeConfig {
-  id: ThemeMode;
+  id: ConcreteThemeMode;
   name: string;
   category: "light" | "dark";
   previewBg: string;
@@ -31,7 +32,7 @@ export interface ThemeConfig {
   };
 }
 
-export const THEMES: Record<ThemeMode, ThemeConfig> = {
+export const THEMES: Record<ConcreteThemeMode, ThemeConfig> = {
   nordic: {
     id: "nordic",
     name: "Nordic Minimal",

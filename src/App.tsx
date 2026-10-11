@@ -28,7 +28,7 @@ import {
   ShieldCheck,
   Sparkles,
 } from "lucide-react";
-import { THEMES, ThemeMode } from "./theme";
+import { THEMES, ThemeMode, ConcreteThemeMode } from "./theme";
 import { useUpdater } from "./useUpdater";
 import { UpdateModal } from "./UpdateModal";
 
@@ -79,10 +79,21 @@ interface AppGuardConfig {
 export default function App() {
   const [activeTab, setActiveTab] = useState<"apps" | "vault" | "appearance" | "settings">("apps");
   const [currentTheme, setCurrentTheme] = useState<ThemeMode>(() => {
-    return (localStorage.getItem("appguard_theme") as ThemeMode) || "nordic";
+    return (localStorage.getItem("appguard_theme") as ThemeMode) || "system";
+  });
+  const [systemIsDark, setSystemIsDark] = useState<boolean>(() => {
+    return typeof window !== "undefined" && window.matchMedia("(prefers-color-scheme: dark)").matches;
   });
 
-  const theme = THEMES[currentTheme] || THEMES.nordic;
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const handler = (e: MediaQueryListEvent) => setSystemIsDark(e.matches);
+    media.addEventListener("change", handler);
+    return () => media.removeEventListener("change", handler);
+  }, []);
+
+  const activeThemeKey = currentTheme === "system" ? (systemIsDark ? "obsidian" : "nordic") : currentTheme;
+  const theme = THEMES[activeThemeKey as keyof typeof THEMES] || THEMES.nordic;
   const isLight = theme.category === "light";
 
   // Auto-updater hook
@@ -1206,6 +1217,45 @@ export default function App() {
                 </p>
               </div>
 
+              {/* System Auto Theme Card */}
+              <div
+                onClick={() => setCurrentTheme("system")}
+                className="p-4 rounded-2xl border-2 cursor-pointer transition-all hover:scale-[1.01] flex items-center justify-between"
+                style={{
+                  backgroundColor: theme.colors.bgCard,
+                  borderColor: currentTheme === "system" ? theme.colors.accent : theme.colors.border,
+                  boxShadow: currentTheme === "system" ? `0 8px 24px ${theme.colors.accentGlow}` : "none",
+                }}
+              >
+                <div className="flex items-center gap-3">
+                  <div
+                    className="w-10 h-10 rounded-xl flex items-center justify-center text-white"
+                    style={{ backgroundColor: theme.colors.accent }}
+                  >
+                    <Sparkles className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h4 className="font-bold text-sm flex items-center gap-2" style={{ color: theme.colors.textPrimary }}>
+                      System Default (Auto)
+                      <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-500 border border-blue-500/20">
+                        Follows OS Appearance
+                      </span>
+                    </h4>
+                    <p className="text-xs" style={{ color: theme.colors.textSecondary }}>
+                      Automatically switches between Nordic Minimal (Light) and Obsidian Cyber (Dark) based on system settings.
+                    </p>
+                  </div>
+                </div>
+                {currentTheme === "system" && (
+                  <div
+                    className="w-6 h-6 rounded-full flex items-center justify-center text-white ml-4 flex-shrink-0"
+                    style={{ backgroundColor: theme.colors.accent }}
+                  >
+                    <Check className="w-3.5 h-3.5" />
+                  </div>
+                )}
+              </div>
+
               {/* Light Themes */}
               <div>
                 <div className="flex items-center gap-2 mb-3 text-xs font-semibold uppercase tracking-wider" style={{ color: theme.colors.textMuted }}>
@@ -1213,7 +1263,7 @@ export default function App() {
                   <span>Light Themes (Clean & Ergonomic)</span>
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                  {(["nordic", "editorial", "rose", "emerald", "amber"] as ThemeMode[]).map((mode) => {
+                  {(["nordic", "editorial", "rose", "emerald", "amber"] as ConcreteThemeMode[]).map((mode) => {
                     const item = THEMES[mode];
                     const selected = currentTheme === mode;
                     const subtitles: Record<string, string> = {
@@ -1274,7 +1324,7 @@ export default function App() {
                   <span>Dark Themes (Low Glare & Deep Focus)</span>
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {(["slate", "obsidian"] as ThemeMode[]).map((mode) => {
+                  {(["slate", "obsidian"] as ConcreteThemeMode[]).map((mode) => {
                     const item = THEMES[mode];
                     const selected = currentTheme === mode;
                     return (
@@ -1695,6 +1745,74 @@ export default function App() {
                     <RefreshCw className={`w-3.5 h-3.5 ${updaterState.status === "checking" ? "animate-spin" : ""}`} />
                     <span>{updaterState.status === "checking" ? "Checking..." : "Check for Updates"}</span>
                   </button>
+                </div>
+              </div>
+
+              {/* Section 5: Security Architecture & Threat Model */}
+              <div
+                className="p-6 rounded-2xl border space-y-4"
+                style={{
+                  backgroundColor: theme.colors.bgCard,
+                  borderColor: theme.colors.borderCard,
+                }}
+              >
+                <div className="flex items-center gap-3">
+                  <div
+                    className="w-10 h-10 rounded-xl flex items-center justify-center text-white"
+                    style={{ backgroundColor: theme.colors.accent }}
+                  >
+                    <ShieldCheck className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h4 className="font-bold text-sm" style={{ color: theme.colors.textPrimary }}>
+                      Security Architecture & Threat Model
+                    </h4>
+                    <p className="text-xs" style={{ color: theme.colors.textSecondary }}>
+                      Transparent cryptographic boundaries and privacy guarantees.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-2">
+                  <div
+                    className="p-3.5 rounded-xl border space-y-1.5"
+                    style={{
+                      borderColor: theme.colors.border,
+                      backgroundColor: isLight ? "#f8fafc" : "rgba(255,255,255,0.02)",
+                    }}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                      <h5 className="text-xs font-bold" style={{ color: theme.colors.textPrimary }}>
+                        Defended Attack Surfaces
+                      </h5>
+                    </div>
+                    <ul className="text-[11px] space-y-1 list-disc pl-4" style={{ color: theme.colors.textSecondary }}>
+                      <li><strong>Shoulder Surfers & Casual Snooping:</strong> Frontmost application detection automatically hides windows and enforces biometric verification.</li>
+                      <li><strong>At-Rest File Inspection:</strong> Vaults use authenticated AES-256-GCM encryption with unique per-file nonces and Argon2id key derivation.</li>
+                      <li><strong>Force Quit Attempts:</strong> OS-level supervisor daemon (launchd/Task Scheduler/systemd) resurrects background guard if process is killed.</li>
+                    </ul>
+                  </div>
+
+                  <div
+                    className="p-3.5 rounded-xl border space-y-1.5"
+                    style={{
+                      borderColor: theme.colors.border,
+                      backgroundColor: isLight ? "#f8fafc" : "rgba(255,255,255,0.02)",
+                    }}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="w-2 h-2 rounded-full bg-amber-500" />
+                      <h5 className="text-xs font-bold" style={{ color: theme.colors.textPrimary }}>
+                        Operational Boundaries
+                      </h5>
+                    </div>
+                    <ul className="text-[11px] space-y-1 list-disc pl-4" style={{ color: theme.colors.textSecondary }}>
+                      <li><strong>Userland Security Barrier:</strong> AppGuard runs with user privileges to control GUI focus and file encryption without requiring root/kernel extensions.</li>
+                      <li><strong>Physical / Root Terminal Access:</strong> Intruders with local root or debug privileges can inspect unencrypted process memory while an app is active.</li>
+                      <li><strong>Local Authenticated Encryption:</strong> Zero cloud telemetry or external servers. All cryptographic keys are derived locally in memory.</li>
+                    </ul>
+                  </div>
                 </div>
               </div>
             </div>
