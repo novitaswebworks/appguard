@@ -1,22 +1,21 @@
-import React, { useEffect, useState } from "react";
+import React from "react";
 import ReactDOM from "react-dom/client";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import App from "./App";
 import { CompactAuthPanel } from "./CompactAuthPanel";
 import "./App.css";
 
+function getInitialWindowLabel(): string {
+  try {
+    return getCurrentWindow().label;
+  } catch {
+    return "main";
+  }
+}
+
+const windowLabel = getInitialWindowLabel();
+
 function Root() {
-  const [windowLabel, setWindowLabel] = useState<string>("main");
-
-  useEffect(() => {
-    try {
-      const win = getCurrentWindow();
-      setWindowLabel(win.label);
-    } catch {
-      setWindowLabel("main");
-    }
-  }, []);
-
   if (windowLabel === "auth") {
     return <CompactAuthPanel />;
   }

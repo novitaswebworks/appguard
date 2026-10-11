@@ -180,6 +180,11 @@ fn unlock_app_session(
     app_handle: tauri::AppHandle,
     security: State<'_, Arc<SecurityManager>>,
 ) -> Result<bool, String> {
+    // Cryptographically enforce authorization: caller must have recently authenticated via biometric or PIN
+    if !security.consume_recent_auth() {
+        return Err("Unauthorized: Session unlock requires recent user authentication (PIN or Biometric)".into());
+    }
+
     security.mark_app_unlocked(&bundle_id, duration_secs);
 
     #[cfg(target_os = "macos")]

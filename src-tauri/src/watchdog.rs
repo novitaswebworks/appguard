@@ -70,16 +70,18 @@ pub fn start_focus_watchdog(app_handle: AppHandle, security: Arc<SecurityManager
                             }),
                         );
 
-                        // Prefer showing compact 'auth' floating window (Option A); fallback to 'main' only if needed
-                        let target_window = app_handle
-                            .get_webview_window("auth")
-                            .or_else(|| app_handle.get_webview_window("main"));
+                        // Explicitly hide the main dashboard window so it never interrupts the user
+                        if let Some(main_win) = app_handle.get_webview_window("main") {
+                            let _ = main_win.set_always_on_top(false);
+                            let _ = main_win.hide();
+                        }
 
-                        if let Some(window) = target_window {
-                            let _ = window.show();
-                            let _ = window.unminimize();
-                            let _ = window.set_always_on_top(true);
-                            let _ = window.set_focus();
+                        // Show only the compact 'auth' floating window
+                        if let Some(auth_win) = app_handle.get_webview_window("auth") {
+                            let _ = auth_win.show();
+                            let _ = auth_win.unminimize();
+                            let _ = auth_win.set_always_on_top(true);
+                            let _ = auth_win.set_focus();
 
                             // Force macOS App Activation to steal focus over the locked app
                             if let Some(ns_app_cls) = AnyClass::get(c"NSApplication") {
@@ -146,15 +148,16 @@ pub fn start_focus_watchdog(app_handle: AppHandle, security: Arc<SecurityManager
                                 }),
                             );
 
-                            let target_window = app_handle
-                                .get_webview_window("auth")
-                                .or_else(|| app_handle.get_webview_window("main"));
+                            if let Some(main_win) = app_handle.get_webview_window("main") {
+                                let _ = main_win.set_always_on_top(false);
+                                let _ = main_win.hide();
+                            }
 
-                            if let Some(window) = target_window {
-                                let _ = window.show();
-                                let _ = window.unminimize();
-                                let _ = window.set_always_on_top(true);
-                                let _ = window.set_focus();
+                            if let Some(auth_win) = app_handle.get_webview_window("auth") {
+                                let _ = auth_win.show();
+                                let _ = auth_win.unminimize();
+                                let _ = auth_win.set_always_on_top(true);
+                                let _ = auth_win.set_focus();
                             }
                         }
                     }
@@ -204,15 +207,16 @@ pub fn start_focus_watchdog(app_handle: AppHandle, security: Arc<SecurityManager
                                 }),
                             );
 
-                            let target_window = app_handle
-                                .get_webview_window("auth")
-                                .or_else(|| app_handle.get_webview_window("main"));
+                            if let Some(main_win) = app_handle.get_webview_window("main") {
+                                let _ = main_win.set_always_on_top(false);
+                                let _ = main_win.hide();
+                            }
 
-                            if let Some(window) = target_window {
-                                let _ = window.show();
-                                let _ = window.unminimize();
-                                let _ = window.set_always_on_top(true);
-                                let _ = window.set_focus();
+                            if let Some(auth_win) = app_handle.get_webview_window("auth") {
+                                let _ = auth_win.show();
+                                let _ = auth_win.unminimize();
+                                let _ = auth_win.set_always_on_top(true);
+                                let _ = auth_win.set_focus();
                             }
                         }
                     }

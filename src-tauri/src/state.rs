@@ -91,6 +91,8 @@ pub struct SecurityManager {
     active_unlocked: RwLock<HashSet<String>>,
     // Tracks if AppGuard itself has been authenticated for this session
     is_app_authenticated: RwLock<bool>,
+    // Tracks time of most recent successful user verification (PIN or Biometric)
+    last_auth_time: RwLock<Option<Instant>>,
     // Rate limiting: count of consecutive failed attempts
     failed_attempts: RwLock<u32>,
     // Lockout expiry time if too many failed attempts
@@ -136,6 +138,7 @@ impl SecurityManager {
             custom_expiry: RwLock::new(HashMap::new()),
             active_unlocked: RwLock::new(HashSet::new()),
             is_app_authenticated: RwLock::new(false),
+            last_auth_time: RwLock::new(None),
             failed_attempts: RwLock::new(0),
             locked_until: RwLock::new(None),
         }
@@ -154,6 +157,30 @@ impl SecurityManager {
 
     pub fn set_app_authenticated(&self, auth: bool) {
         *self.is_app_authenticated.write() = auth;
+        if auth {
+            *self.last_auth_time.write() = Some(Instant::now());
+        }
+    }
+
+    pub fn record_successful_auth(&self) {
+        *self.last_auth_time.write() = Some(Instant::now());
+    }
+
+    pub fn consume_recent_auth(&self) -> bool {
+        // If no PIN is configured, allow unlock
+        if !self.is_pin_configured() {
+            return true;
+        }
+        let mut last = self.last_auth_time.write();
+        if let Some(t) = *last {
+            // Require authentication to have occurred within the last 15 seconds
+            if t.elapsed() < Duration::from_secs(15) {
+                // Consume ticket
+                *last = None;
+                return true;
+            }
+        }
+        false
     }
 
     pub fn log_event(&self, event_type: &str, description: &str, severity: &str) {
@@ -593,6 +620,7 @@ mod tests {
             custom_expiry: RwLock::new(HashMap::new()),
             active_unlocked: RwLock::new(HashSet::new()),
             is_app_authenticated: RwLock::new(false),
+            last_auth_time: RwLock::new(None),
             failed_attempts: RwLock::new(0),
             locked_until: RwLock::new(None),
         }
@@ -681,6 +709,25 @@ mod tests {
 
         // After duration: locked again
         assert!(sm.is_app_locked(app_id));
+    }
+
+    #[test]
+    fn test_auth_ticket_consumption() {
+        let sm = create_test_security_manager();
+        sm.set_master_pin("1234").expect("Failed to set PIN");
+
+        // Before authentication: ticket check fails
+        assert!(!sm.consume_recent_auth());
+
+        // Authenticate with valid PIN
+        assert_eq!(sm.verify_master_pin("1234").unwrap(), true);
+        sm.record_successful_auth();
+
+        // First consumption succeeds
+        assert!(sm.consume_recent_auth());
+
+        // Subsequent consumption fails (single-use ticket)
+        assert!(!sm.consume_recent_auth());
     }
 }
 
