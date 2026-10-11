@@ -31,7 +31,9 @@ pub struct AuditEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppGuardConfig {
+    #[serde(default)]
     pub master_pin_hash: Option<String>,
+    #[serde(default)]
     pub recovery_key_hash: Option<String>, // Argon2id hash of one-time recovery key
     pub locked_apps: HashMap<String, AppRule>, // Key: bundle_id (or exe name)
     pub locked_folders: Vec<String>,
@@ -83,6 +85,8 @@ pub struct SecurityManager {
     pub config: RwLock<AppGuardConfig>,
     // Tracks when an app was last unlocked to respect grace periods
     unlocked_at: RwLock<HashMap<String, Instant>>,
+    // Tracks custom temporary expiry deadlines (e.g. 5 minutes)
+    custom_expiry: RwLock<HashMap<String, Instant>>,
     // Set of currently unlocked session tokens
     active_unlocked: RwLock<HashSet<String>>,
     // Tracks if AppGuard itself has been authenticated for this session
@@ -129,6 +133,7 @@ impl SecurityManager {
             config_path,
             config: RwLock::new(config),
             unlocked_at: RwLock::new(HashMap::new()),
+            custom_expiry: RwLock::new(HashMap::new()),
             active_unlocked: RwLock::new(HashSet::new()),
             is_app_authenticated: RwLock::new(false),
             failed_attempts: RwLock::new(0),
@@ -259,16 +264,21 @@ impl SecurityManager {
             None => return Err("No recovery key configured on this device".into()),
         };
 
-        if let Ok(parsed_hash) = PasswordHash::new(stored_hash) {
-            if Argon2::default().verify_password(clean_key.as_bytes(), &parsed_hash).is_ok() {
-                drop(cfg);
-                // Recovery key is single-use: reset recovery key hash and set new master pin
-                self.set_master_pin(new_pin)?;
-                self.config.write().recovery_key_hash = None;
-                self.set_app_authenticated(true);
-                self.log_event("recovery_used", "Account successfully recovered via Emergency Key", "critical");
-                return Ok(true);
-            }
+        let valid_key = if let Ok(parsed_hash) = PasswordHash::new(&stored_hash) {
+            Argon2::default().verify_password(clean_key.as_bytes(), &parsed_hash).is_ok()
+        } else {
+            false
+        };
+
+        drop(cfg);
+
+        if valid_key {
+            // Recovery key is single-use: reset recovery key hash and set new master pin
+            self.set_master_pin(new_pin)?;
+            self.config.write().recovery_key_hash = None;
+            self.set_app_authenticated(true);
+            self.log_event("recovery_used", "Account successfully recovered via Emergency Key", "critical");
+            return Ok(true);
         }
 
         self.log_event("recovery_failed", "Invalid emergency recovery key entered", "critical");
@@ -294,14 +304,15 @@ impl SecurityManager {
 
         let cfg = self.config.read();
         let stored_hash = match cfg.master_pin_hash.as_ref() {
-            Some(h) => h,
+            Some(h) => h.clone(),
             None => return Ok(false),
         };
 
         let mut is_valid = false;
+        let mut needs_upgrade = false;
 
         // 1. Try modern Argon2id verification
-        if let Ok(parsed_hash) = PasswordHash::new(stored_hash) {
+        if let Ok(parsed_hash) = PasswordHash::new(&stored_hash) {
             if Argon2::default().verify_password(pin.as_bytes(), &parsed_hash).is_ok() {
                 is_valid = true;
             }
@@ -311,11 +322,9 @@ impl SecurityManager {
         if !is_valid {
             let salt = get_or_create_keychain_salt();
             let salted_hash = compute_salted_pin_hash(pin, &salt);
-            if stored_hash == &salted_hash {
-                // Transparently upgrade to Argon2id
-                drop(cfg);
-                let _ = self.set_master_pin(pin);
-                return Ok(true);
+            if stored_hash == salted_hash {
+                is_valid = true;
+                needs_upgrade = true;
             }
         }
 
@@ -324,12 +333,18 @@ impl SecurityManager {
             let mut hasher = Sha256::new();
             hasher.update(pin.as_bytes());
             let legacy_hash = format!("{:x}", hasher.finalize());
-            if stored_hash == &legacy_hash {
-                // Transparently upgrade to Argon2id
-                drop(cfg);
-                let _ = self.set_master_pin(pin);
-                return Ok(true);
+            if stored_hash == legacy_hash {
+                is_valid = true;
+                needs_upgrade = true;
             }
+        }
+
+        // Explicitly drop read lock on config before log_event or set_master_pin (which require write lock)
+        drop(cfg);
+
+        if needs_upgrade {
+            let _ = self.set_master_pin(pin);
+            return Ok(true);
         }
 
         if is_valid {
@@ -421,12 +436,30 @@ impl SecurityManager {
             return false;
         }
 
-        // If instant_lock_mode is enabled or grace_period is 0, session only lasts until app loses focus
+        // 1. Check custom temporary unlock expiry (e.g. 5 minutes from CompactAuthPanel)
+        let has_custom = self.custom_expiry.read().contains_key(bundle_id);
+        if has_custom {
+            let custom = self.custom_expiry.read();
+            if let Some(deadline) = custom.get(bundle_id) {
+                if Instant::now() < *deadline {
+                    return false; // Still within custom temporary unlock window
+                }
+            }
+            drop(custom);
+            // Custom duration expired: clean up unlocked session and report locked
+            self.unlocked_at.write().remove(bundle_id);
+            self.custom_expiry.write().remove(bundle_id);
+            self.active_unlocked.write().remove(bundle_id);
+            return true;
+        }
+
+        // If instant_lock_mode is enabled or grace_period is 0 (and no custom expiry is active),
+        // session only lasts until app loses focus
         if cfg.instant_lock_mode || cfg.grace_period_seconds == 0 {
             return !self.active_unlocked.read().contains(bundle_id);
         }
 
-        // Check if unlocked within grace period
+        // 2. Check if unlocked within standard grace period
         let grace = Duration::from_secs(cfg.grace_period_seconds);
         let unlocked = self.unlocked_at.read();
         if let Some(last_unlocked) = unlocked.get(bundle_id) {
@@ -436,8 +469,9 @@ impl SecurityManager {
         }
         drop(unlocked);
 
-        // Grace period has expired: clean up unlocked session and report locked
+        // Grace period or temporary duration has expired: clean up unlocked session and report locked
         self.unlocked_at.write().remove(bundle_id);
+        self.custom_expiry.write().remove(bundle_id);
         self.active_unlocked.write().remove(bundle_id);
         true
     }
@@ -446,12 +480,16 @@ impl SecurityManager {
         self.unlocked_at.write().insert(bundle_id.to_string(), Instant::now());
         self.active_unlocked.write().insert(bundle_id.to_string());
 
-        let desc = if let Some(secs) = duration_secs {
-            format!("Unlocked session granted for '{bundle_id}' ({secs}s temporary unlock)")
+        if let Some(secs) = duration_secs {
+            let deadline = Instant::now() + Duration::from_secs(secs);
+            self.custom_expiry.write().insert(bundle_id.to_string(), deadline);
+            let desc = format!("Unlocked session granted for '{bundle_id}' ({secs}s temporary unlock)");
+            self.log_event("app_unlocked", &desc, "info");
         } else {
-            format!("Unlocked session granted for '{bundle_id}'")
-        };
-        self.log_event("app_unlocked", &desc, "info");
+            self.custom_expiry.write().remove(bundle_id);
+            let desc = format!("Unlocked session granted for '{bundle_id}'");
+            self.log_event("app_unlocked", &desc, "info");
+        }
     }
 
     pub fn add_vault_folder(&self, path: String) -> Result<(), String> {
@@ -474,6 +512,7 @@ impl SecurityManager {
 
     pub fn lock_all(&self) {
         self.unlocked_at.write().clear();
+        self.custom_expiry.write().clear();
         self.active_unlocked.write().clear();
         *self.is_app_authenticated.write() = false;
         self.log_event("lock_all", "Emergency Lock All triggered across all apps & vaults", "warning");
@@ -536,3 +575,112 @@ fn get_or_create_keychain_salt() -> String {
         "appguard_static_salt_fallback_platform".into()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_test_security_manager() -> SecurityManager {
+        let temp_dir = std::env::temp_dir().join(format!("ag_test_{:x}", rand::rng().random_range(0..1_000_000)));
+        let _ = fs::create_dir_all(&temp_dir);
+        let config_path = temp_dir.join("test_config.json");
+        let config = AppGuardConfig::default();
+
+        SecurityManager {
+            config_path,
+            config: RwLock::new(config),
+            unlocked_at: RwLock::new(HashMap::new()),
+            custom_expiry: RwLock::new(HashMap::new()),
+            active_unlocked: RwLock::new(HashSet::new()),
+            is_app_authenticated: RwLock::new(false),
+            failed_attempts: RwLock::new(0),
+            locked_until: RwLock::new(None),
+        }
+    }
+
+    #[test]
+    fn test_master_pin_set_and_verify() {
+        let sm = create_test_security_manager();
+        sm.set_master_pin("1234").expect("Failed to set PIN");
+        assert!(sm.is_pin_configured());
+
+        // Valid PIN
+        assert_eq!(sm.verify_master_pin("1234").unwrap(), true);
+
+        // Invalid PIN
+        assert_eq!(sm.verify_master_pin("9999").unwrap(), false);
+    }
+
+    #[test]
+    fn test_failed_attempts_progressive_lockout() {
+        let sm = create_test_security_manager();
+        sm.set_master_pin("1234").expect("Failed to set PIN");
+
+        // Fail 4 times (under threshold)
+        for _ in 0..4 {
+            assert_eq!(sm.verify_master_pin("0000").unwrap(), false);
+        }
+
+        // 5th failure triggers lockout Err
+        let res = sm.verify_master_pin("0000");
+        assert!(res.is_err(), "Expected 5th failure to trigger lockout");
+        assert!(res.unwrap_err().contains("Locked out"));
+
+        // Subsequent check_lockout should also return Err
+        assert!(sm.check_lockout().is_err());
+    }
+
+    #[test]
+    fn test_recovery_key_lifecycle() {
+        let sm = create_test_security_manager();
+        sm.set_master_pin("1111").expect("Failed to set initial PIN");
+
+        let recovery_key = sm.generate_recovery_key().expect("Failed to generate key");
+        assert!(recovery_key.starts_with("AG-"));
+        assert!(sm.is_recovery_configured());
+
+        // Bad key fails
+        let bad_res = sm.verify_recovery_key("AG-INVALID-KEY-1234", "2222");
+        assert!(bad_res.is_err());
+
+        // Good key resets PIN and clears recovery key
+        let ok_res = sm.verify_recovery_key(&recovery_key, "2222");
+        assert_eq!(ok_res.unwrap(), true);
+
+        // New PIN works
+        assert_eq!(sm.verify_master_pin("2222").unwrap(), true);
+        // Recovery key was single-use: now cleared
+        assert!(!sm.is_recovery_configured());
+    }
+
+    #[test]
+    fn test_temporary_unlock_expiry() {
+        let sm = create_test_security_manager();
+        let app_id = "com.apple.Terminal";
+
+        let rule = AppRule {
+            bundle_id: app_id.to_string(),
+            name: "Terminal".to_string(),
+            path: "/System/Applications/Utilities/Terminal.app".to_string(),
+            is_locked: true,
+            icon_base64: None,
+        };
+        sm.toggle_app_lock(rule.clone()).unwrap();
+
+        // Initially locked
+        assert!(sm.is_app_locked(app_id));
+
+        // Unlock with 2 seconds temporary duration
+        sm.mark_app_unlocked(app_id, Some(2));
+
+        // Within duration: unlocked
+        assert!(!sm.is_app_locked(app_id));
+
+        // Sleep to exceed 2 seconds
+        std::thread::sleep(Duration::from_millis(2100));
+
+        // After duration: locked again
+        assert!(sm.is_app_locked(app_id));
+    }
+}
+

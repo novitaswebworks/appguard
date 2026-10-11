@@ -11,22 +11,19 @@ impl WindowsPlatformOps {
 
 impl PlatformOps for WindowsPlatformOps {
     fn check_biometrics(&self) -> PlatformBiometricStatus {
-        // On Windows 10/11, Windows Hello availability is checked via:
-        // Windows.Security.Credentials.UI.UserConsentVerifier.CheckAvailabilityAsync()
-        // Available outcomes: Available, DeviceNotPresent, NotConfigured, DisabledByPolicy
+        // Windows Hello UserConsentVerifier requires Windows SDK / WinRT integration
+        // Currently fallback to Master PIN until WinRT runtime is configured
         PlatformBiometricStatus {
-            is_available: true,
-            biometric_type: "WindowsHello".into(),
-            has_system_passcode: true,
-            error_message: None,
+            is_available: false,
+            biometric_type: "PIN".into(),
+            has_system_passcode: false,
+            error_message: Some("Native Windows Hello not active on this build. Verify with Master PIN.".into()),
         }
     }
 
     fn authenticate_biometrics(&self, _reason: &str) -> Result<bool, String> {
-        // Invokes Windows Hello prompt:
-        // UserConsentVerifier.RequestVerificationAsync(reason)
-        // Returns UserConsentVerificationResult::Verified
-        Ok(true)
+        // Safe fallback: never auto-authenticate without user verification
+        Err("Native Windows Hello is not yet initialized. Please verify using Master PIN.".into())
     }
 
     fn get_frontmost_app(&self) -> Option<FrontmostAppInfo> {
