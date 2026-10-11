@@ -75,6 +75,15 @@ fn get_activity_log(security: State<'_, Arc<SecurityManager>>) -> Vec<state::Aud
 }
 
 #[tauri::command]
+fn get_locked_app_target(
+    security: State<'_, Arc<SecurityManager>>,
+) -> Option<serde_json::Value> {
+    security
+        .get_pending_locked_target()
+        .map(|(bundle_id, name)| serde_json::json!({ "bundle_id": bundle_id, "name": name }))
+}
+
+#[tauri::command]
 fn is_app_authenticated(security: State<'_, Arc<SecurityManager>>) -> bool {
     security.is_app_authenticated()
 }
@@ -186,6 +195,7 @@ fn unlock_app_session(
     }
 
     security.mark_app_unlocked(&bundle_id, duration_secs);
+    security.clear_pending_locked_target();
 
     #[cfg(target_os = "macos")]
     {
@@ -279,7 +289,9 @@ fn lock_all_sessions(
 fn close_locked_application(
     _bundle_id: String,
     app_handle: tauri::AppHandle,
+    security: State<'_, Arc<SecurityManager>>,
 ) -> Result<bool, String> {
+    security.clear_pending_locked_target();
     if let Some(auth_win) = app_handle.get_webview_window("auth") {
         let _ = auth_win.set_always_on_top(false);
         let _ = auth_win.hide();
@@ -319,7 +331,11 @@ fn close_locked_application(
 }
 
 #[tauri::command]
-fn hide_auth_window(app_handle: tauri::AppHandle) -> bool {
+fn hide_auth_window(
+    app_handle: tauri::AppHandle,
+    security: State<'_, Arc<SecurityManager>>,
+) -> bool {
+    security.clear_pending_locked_target();
     if let Some(auth_win) = app_handle.get_webview_window("auth") {
         let _ = auth_win.set_always_on_top(false);
         let _ = auth_win.hide();
@@ -524,6 +540,7 @@ pub fn run() {
             verify_recovery_key,
             get_activity_log,
             hide_auth_window,
+            get_locked_app_target,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

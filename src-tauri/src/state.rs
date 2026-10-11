@@ -97,6 +97,8 @@ pub struct SecurityManager {
     failed_attempts: RwLock<u32>,
     // Lockout expiry time if too many failed attempts
     locked_until: RwLock<Option<Instant>>,
+    // Current locked application awaiting authentication
+    pending_locked_target: RwLock<Option<(String, String)>>,
 }
 
 impl SecurityManager {
@@ -141,6 +143,7 @@ impl SecurityManager {
             last_auth_time: RwLock::new(None),
             failed_attempts: RwLock::new(0),
             locked_until: RwLock::new(None),
+            pending_locked_target: RwLock::new(None),
         }
     }
 
@@ -160,6 +163,18 @@ impl SecurityManager {
         if auth {
             *self.last_auth_time.write() = Some(Instant::now());
         }
+    }
+
+    pub fn set_pending_locked_target(&self, bundle_id: String, name: String) {
+        *self.pending_locked_target.write() = Some((bundle_id, name));
+    }
+
+    pub fn get_pending_locked_target(&self) -> Option<(String, String)> {
+        self.pending_locked_target.read().clone()
+    }
+
+    pub fn clear_pending_locked_target(&self) {
+        *self.pending_locked_target.write() = None;
     }
 
     pub fn record_successful_auth(&self) {
@@ -345,8 +360,8 @@ impl SecurityManager {
             }
         }
 
-        // 2. Try previous Keychain-salted hash ($salted$v1$...)
-        if !is_valid {
+        // 2. Try previous Keychain-salted hash ($salted$v1$...) ONLY if stored hash has this prefix
+        if !is_valid && stored_hash.starts_with("$salted$v1$") {
             let salt = get_or_create_keychain_salt();
             let salted_hash = compute_salted_pin_hash(pin, &salt);
             if stored_hash == salted_hash {
@@ -623,6 +638,7 @@ mod tests {
             last_auth_time: RwLock::new(None),
             failed_attempts: RwLock::new(0),
             locked_until: RwLock::new(None),
+            pending_locked_target: RwLock::new(None),
         }
     }
 

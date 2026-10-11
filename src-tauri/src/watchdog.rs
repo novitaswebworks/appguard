@@ -12,6 +12,8 @@ pub fn start_focus_watchdog(app_handle: AppHandle, security: Arc<SecurityManager
     std::thread::spawn(move || {
         let mut last_bundle = String::new();
 
+        let my_pid = std::process::id() as i32;
+
         loop {
             std::thread::sleep(Duration::from_millis(150));
 
@@ -33,14 +35,20 @@ pub fn start_focus_watchdog(app_handle: AppHandle, security: Arc<SecurityManager
                     continue;
                 }
 
-                let bundle_id_ns: *mut NSString = msg_send![frontmost_app, bundleIdentifier];
-                if bundle_id_ns.is_null() {
+                let proc_pid: i32 = msg_send![frontmost_app, processIdentifier];
+                if proc_pid == my_pid {
+                    // AppGuard itself (either main window or auth window) is frontmost
                     continue;
                 }
 
-                let current_bundle = (*bundle_id_ns).to_string();
+                let bundle_id_ns: *mut NSString = msg_send![frontmost_app, bundleIdentifier];
+                let current_bundle = if !bundle_id_ns.is_null() {
+                    (*bundle_id_ns).to_string()
+                } else {
+                    String::new()
+                };
 
-                // When AppGuard is frontmost, record it in last_bundle and continue
+                // When AppGuard bundle or empty, skip
                 if current_bundle == "com.appguard.desktop" || current_bundle.is_empty() {
                     last_bundle = current_bundle;
                     continue;
@@ -61,14 +69,8 @@ pub fn start_focus_watchdog(app_handle: AppHandle, security: Arc<SecurityManager
                         // Immediately hide the unauthorized locked application from screen!
                         let _: () = msg_send![frontmost_app, hide];
 
-                        // Emit locked app event to frontend & bring AppGuard lock window to focus
-                        let _ = app_handle.emit(
-                            "app-locked-triggered",
-                            serde_json::json!({
-                                "bundle_id": current_bundle,
-                                "name": app_name,
-                            }),
-                        );
+                        // Record pending locked target in SecurityManager so CompactAuthPanel can query it synchronously
+                        security.set_pending_locked_target(current_bundle.clone(), app_name.clone());
 
                         // Explicitly hide the main dashboard window so it never interrupts the user
                         if let Some(main_win) = app_handle.get_webview_window("main") {
@@ -76,7 +78,7 @@ pub fn start_focus_watchdog(app_handle: AppHandle, security: Arc<SecurityManager
                             let _ = main_win.hide();
                         }
 
-                        // Show only the compact 'auth' floating window
+                        // Show and bring only the compact 'auth' floating window to top
                         if let Some(auth_win) = app_handle.get_webview_window("auth") {
                             let _ = auth_win.show();
                             let _ = auth_win.unminimize();
@@ -92,6 +94,15 @@ pub fn start_focus_watchdog(app_handle: AppHandle, security: Arc<SecurityManager
                                 }
                             }
                         }
+
+                        // Emit locked app event to frontend
+                        let _ = app_handle.emit(
+                            "app-locked-triggered",
+                            serde_json::json!({
+                                "bundle_id": current_bundle,
+                                "name": app_name,
+                            }),
+                        );
                     }
                 }
             }

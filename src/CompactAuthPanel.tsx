@@ -26,6 +26,24 @@ export function CompactAuthPanel() {
       })
       .catch(() => {});
 
+    // Poll/query pending locked target immediately on mount
+    const fetchPendingTarget = async () => {
+      try {
+        const target = await invoke<LockedAppPayload | null>("get_locked_app_target");
+        if (target) {
+          setLockedApp(target);
+          setPin("");
+          setError(null);
+          setSuccess(false);
+          setTemporaryOption(null);
+        }
+      } catch {}
+    };
+    fetchPendingTarget();
+
+    // Also re-query whenever window gains focus
+    window.addEventListener("focus", fetchPendingTarget);
+
     // Listen for locked application event
     const unlistenPromise = listen<LockedAppPayload>("app-locked-triggered", (event) => {
       setLockedApp(event.payload);
@@ -33,20 +51,17 @@ export function CompactAuthPanel() {
       setError(null);
       setSuccess(false);
       setTemporaryOption(null);
-
-      // Auto-trigger biometric verification first
-      setTimeout(() => {
-        handleBiometricAuth(event.payload.bundle_id, event.payload.name);
-      }, 150);
     });
 
     return () => {
+      window.removeEventListener("focus", fetchPendingTarget);
       unlistenPromise.then((unlisten) => unlisten());
     };
   }, []);
 
   async function handleBiometricAuth(bundleId: string, appName: string) {
     try {
+      setError(null);
       const ok = await invoke<boolean>("authenticate_biometrics", {
         reason: `Unlock ${appName}`,
       });
