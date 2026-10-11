@@ -141,8 +141,8 @@ mod fallback {
     }
 
     pub fn authenticate(_reason: &str) -> Result<bool, String> {
-        // Fallback platform returns true if delegating to master PIN verification in app
-        Ok(true)
+        // Native OS biometrics are not yet implemented on this platform; require Master PIN
+        Err("Native biometric authentication is not available on this platform. Please verify with Master PIN.".into())
     }
 }
 

@@ -20,8 +20,15 @@ fn check_biometrics() -> BiometricStatus {
 }
 
 #[tauri::command]
-fn authenticate_biometrics(reason: String) -> Result<bool, String> {
-    auth::authenticate(&reason)
+fn authenticate_biometrics(
+    reason: String,
+    security: State<'_, Arc<SecurityManager>>,
+) -> Result<bool, String> {
+    let success = auth::authenticate(&reason)?;
+    if success {
+        security.set_app_authenticated(true);
+    }
+    Ok(success)
 }
 
 #[tauri::command]
@@ -49,9 +56,19 @@ fn is_app_authenticated(security: State<'_, Arc<SecurityManager>>) -> bool {
 }
 
 #[tauri::command]
-fn unlock_appguard(security: State<'_, Arc<SecurityManager>>) -> bool {
-    security.set_app_authenticated(true);
-    true
+fn unlock_appguard(
+    reason: Option<String>,
+    security: State<'_, Arc<SecurityManager>>,
+) -> Result<bool, String> {
+    // Rust-enforced authentication gate: require valid OS biometric or passcode
+    let auth_reason = reason.unwrap_or_else(|| "Authenticate to access AppGuard".into());
+    let success = auth::authenticate(&auth_reason)?;
+    if success {
+        security.set_app_authenticated(true);
+        Ok(true)
+    } else {
+        Err("Authentication failed".into())
+    }
 }
 
 #[tauri::command]
@@ -218,6 +235,7 @@ fn lock_all_sessions(
     app_handle: tauri::AppHandle,
     security: State<'_, Arc<SecurityManager>>,
 ) -> bool {
+    security.set_app_authenticated(false);
     enforce_lock_all(&security);
     let _ = app_handle.emit("sessions-locked", ());
     true

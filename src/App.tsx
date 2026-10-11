@@ -418,7 +418,6 @@ export default function App() {
     try {
       const valid = await invoke<boolean>("verify_pin", { pin: selfLockPinInput });
       if (valid) {
-        await invoke("unlock_appguard");
         setSelfLockAuthSuccess(true);
         setTimeout(() => {
           setIsAppLocked(false);
@@ -644,7 +643,7 @@ export default function App() {
                 </span>
               </h1>
               <p className="text-[11px] font-medium" style={{ color: theme.colors.textSecondary }}>
-                Zero-Knowledge Privacy Shield
+                Local Privacy & Biometric Shield
               </p>
             </div>
           </div>
@@ -1047,7 +1046,7 @@ export default function App() {
                     </span>
                   </h3>
                   <p className="text-xs" style={{ color: theme.colors.textSecondary }}>
-                    Folders secured with zero-knowledge AES-256-GCM authenticated encryption. Shielded from Finder exploration when locked.
+                    Folders secured with local AES-256-GCM authenticated encryption. Shielded from Finder exploration when locked.
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
@@ -2043,7 +2042,7 @@ export default function App() {
                     Welcome to AppGuard
                   </h3>
                   <p className="text-xs mt-1.5 max-w-sm mx-auto" style={{ color: theme.colors.textSecondary }}>
-                    Native hardware biometrics & zero-knowledge encrypted vaults for macOS, Windows & Linux
+                    Hardware biometrics & local authenticated AES-256-GCM encryption
                   </p>
                 </div>
 

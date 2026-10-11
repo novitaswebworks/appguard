@@ -2,6 +2,7 @@ use aes_gcm::{
     aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
 };
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -96,22 +97,18 @@ fn encrypt_directory_recursive(dir: &Path, cipher: &Aes256Gcm) -> Result<(), Str
             }
 
             let plaintext = fs::read(&path).map_err(|e| e.to_string())?;
-            // Generate deterministic or random 12-byte nonce
-            let mut hasher = Sha256::new();
-            hasher.update(&plaintext);
-            let digest = hasher.finalize();
-            let nonce_bytes = &digest[0..NONCE_SIZE];
-            let mut nonce_arr = [0u8; NONCE_SIZE];
-            nonce_arr.copy_from_slice(nonce_bytes);
-            let nonce = Nonce::from(nonce_arr);
+            // Generate cryptographically random 12-byte nonce
+            let mut nonce_bytes = [0u8; NONCE_SIZE];
+            rand::rng().fill_bytes(&mut nonce_bytes);
+            let nonce = Nonce::from(nonce_bytes);
 
             let ciphertext = cipher
                 .encrypt(&nonce, plaintext.as_ref())
                 .map_err(|e| format!("Encryption failed: {e}"))?;
 
-            // Store nonce + ciphertext in .appguard_vault
+            // Store nonce (12 bytes) + ciphertext in .appguard_vault
             let mut payload = Vec::with_capacity(NONCE_SIZE + ciphertext.len());
-            payload.extend_from_slice(nonce_bytes);
+            payload.extend_from_slice(&nonce_bytes);
             payload.extend_from_slice(&ciphertext);
 
             let encrypted_path = path.with_extension(format!(

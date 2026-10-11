@@ -1,3 +1,8 @@
+use argon2::{
+    password_hash::{phc::PasswordHash, PasswordHasher, PasswordVerifier},
+    Argon2,
+};
+
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -119,8 +124,11 @@ impl SecurityManager {
         if pin.len() < 4 {
             return Err("PIN must be at least 4 digits".into());
         }
-        let salt = get_or_create_keychain_salt();
-        let hash = compute_salted_pin_hash(pin, &salt);
+        let argon2 = Argon2::default();
+        let hash = argon2
+            .hash_password(pin.as_bytes())
+            .map_err(|e| format!("Argon2 hashing error: {e}"))?
+            .to_string();
 
         self.config.write().master_pin_hash = Some(hash);
         self.save()
@@ -133,19 +141,29 @@ impl SecurityManager {
             None => return false,
         };
 
-        // 1. Try Keychain-salted verification (Hardened)
+        // 1. Try modern Argon2id verification
+        if let Ok(parsed_hash) = PasswordHash::new(stored_hash) {
+            if Argon2::default().verify_password(pin.as_bytes(), &parsed_hash).is_ok() {
+                return true;
+            }
+        }
+
+        // 2. Try previous Keychain-salted hash ($salted$v1$...)
         let salt = get_or_create_keychain_salt();
         let salted_hash = compute_salted_pin_hash(pin, &salt);
         if stored_hash == &salted_hash {
+            // Transparently upgrade to Argon2id
+            drop(cfg);
+            let _ = self.set_master_pin(pin);
             return true;
         }
 
-        // 2. Backwards compatibility for existing plain SHA-256 hash
+        // 3. Backwards compatibility for early legacy plain SHA-256 hash
         let mut hasher = Sha256::new();
         hasher.update(pin.as_bytes());
         let legacy_hash = format!("{:x}", hasher.finalize());
         if stored_hash == &legacy_hash {
-            // Upgrade legacy hash to salted hash transparently
+            // Transparently upgrade to Argon2id
             drop(cfg);
             let _ = self.set_master_pin(pin);
             return true;
@@ -202,7 +220,7 @@ impl SecurityManager {
             return false;
         }
 
-        // If instant_lock_mode is enabled or grace_period is 0, enforce immediate re-lock
+        // If instant_lock_mode is enabled or grace_period is 0, session only lasts until app loses focus
         if cfg.instant_lock_mode || cfg.grace_period_seconds == 0 {
             return !self.active_unlocked.read().contains(bundle_id);
         }
@@ -215,9 +233,12 @@ impl SecurityManager {
                 return false; // Still within grace period
             }
         }
+        drop(unlocked);
 
-        // Check if explicitly unlocked
-        !self.active_unlocked.read().contains(bundle_id)
+        // Grace period has expired: clean up unlocked session and report locked
+        self.unlocked_at.write().remove(bundle_id);
+        self.active_unlocked.write().remove(bundle_id);
+        true
     }
 
     pub fn mark_app_unlocked(&self, bundle_id: &str) {
