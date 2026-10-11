@@ -42,12 +42,36 @@ fn set_master_pin(pin: String, security: State<'_, Arc<SecurityManager>>) -> Res
 }
 
 #[tauri::command]
-fn verify_pin(pin: String, security: State<'_, Arc<SecurityManager>>) -> bool {
-    let valid = security.verify_master_pin(&pin);
+fn verify_pin(pin: String, security: State<'_, Arc<SecurityManager>>) -> Result<bool, String> {
+    let valid = security.verify_master_pin(&pin)?;
     if valid {
         security.set_app_authenticated(true);
     }
-    valid
+    Ok(valid)
+}
+
+#[tauri::command]
+fn generate_recovery_key(security: State<'_, Arc<SecurityManager>>) -> Result<String, String> {
+    security.generate_recovery_key()
+}
+
+#[tauri::command]
+fn is_recovery_configured(security: State<'_, Arc<SecurityManager>>) -> bool {
+    security.is_recovery_configured()
+}
+
+#[tauri::command]
+fn verify_recovery_key(
+    key: String,
+    new_pin: String,
+    security: State<'_, Arc<SecurityManager>>,
+) -> Result<bool, String> {
+    security.verify_recovery_key(&key, &new_pin)
+}
+
+#[tauri::command]
+fn get_activity_log(security: State<'_, Arc<SecurityManager>>) -> Vec<state::AuditEvent> {
+    security.get_activity_log()
 }
 
 #[tauri::command]
@@ -130,7 +154,7 @@ fn change_master_pin(
     new_pin: String,
     security: State<'_, Arc<SecurityManager>>,
 ) -> Result<bool, String> {
-    if !security.verify_master_pin(&old_pin) {
+    if !security.verify_master_pin(&old_pin)? {
         return Err("Current PIN is incorrect".into());
     }
     security.set_master_pin(&new_pin).map(|_| true)
@@ -152,10 +176,11 @@ fn toggle_lock_app(
 #[tauri::command]
 fn unlock_app_session(
     bundle_id: String,
+    duration_secs: Option<u64>,
     app_handle: tauri::AppHandle,
     security: State<'_, Arc<SecurityManager>>,
 ) -> Result<bool, String> {
-    security.mark_app_unlocked(&bundle_id);
+    security.mark_app_unlocked(&bundle_id, duration_secs);
 
     #[cfg(target_os = "macos")]
     {
@@ -321,9 +346,10 @@ fn encrypt_vault_folder(
     pin: String,
     security: State<'_, Arc<SecurityManager>>,
 ) -> Result<bool, String> {
-    if !security.verify_master_pin(&pin) {
+    if !security.verify_master_pin(&pin)? {
         return Err("Invalid Master PIN".into());
     }
+    security.log_event("vault_encrypted", &format!("Folder successfully encrypted: {folder_path}"), "info");
     vault::lock_folder(&folder_path, &pin)
 }
 
@@ -333,9 +359,10 @@ fn decrypt_vault_folder(
     pin: String,
     security: State<'_, Arc<SecurityManager>>,
 ) -> Result<bool, String> {
-    if !security.verify_master_pin(&pin) {
+    if !security.verify_master_pin(&pin)? {
         return Err("Invalid Master PIN".into());
     }
+    security.log_event("vault_decrypted", &format!("Folder decrypted: {folder_path}"), "info");
     vault::unlock_folder(&folder_path, &pin)
 }
 
@@ -470,6 +497,10 @@ pub fn run() {
             remove_folder_from_vault,
             encrypt_vault_folder,
             decrypt_vault_folder,
+            generate_recovery_key,
+            is_recovery_configured,
+            verify_recovery_key,
+            get_activity_log,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

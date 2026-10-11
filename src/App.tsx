@@ -5,7 +5,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { isEnabled, enable, disable } from "@tauri-apps/plugin-autostart";
 import {
   Shield,
-  ShieldAlert,
+  Key,
   Lock,
   Unlock,
   Fingerprint,
@@ -27,6 +27,8 @@ import {
   Clock,
   ShieldCheck,
   Sparkles,
+  History,
+  AlertTriangle,
 } from "lucide-react";
 import { THEMES, ThemeMode, ConcreteThemeMode } from "./theme";
 import { useUpdater } from "./useUpdater";
@@ -63,8 +65,16 @@ interface AppRule {
   icon_base64?: string;
 }
 
+interface AuditEvent {
+  timestamp: number;
+  event_type: string;
+  description: string;
+  severity: "info" | "warning" | "critical";
+}
+
 interface AppGuardConfig {
   master_pin_hash?: string;
+  recovery_key_hash?: string;
   locked_apps: Record<string, AppRule>;
   locked_folders: string[];
   grace_period_seconds: number;
@@ -74,6 +84,7 @@ interface AppGuardConfig {
   lock_on_screensaver: boolean;
   instant_lock_mode: boolean;
   tamper_protection_enabled?: boolean;
+  activity_log?: AuditEvent[];
 }
 
 export default function App() {
@@ -113,12 +124,6 @@ export default function App() {
   const [appFilter, setAppFilter] = useState<"all" | "locked" | "unlocked">("all");
   const [loadingApps, setLoadingApps] = useState(false);
 
-  // Lock Trigger Overlay State
-  const [lockedTrigger, setLockedTrigger] = useState<{ bundle_id: string; name: string } | null>(null);
-  const [pinInput, setPinInput] = useState("");
-  const [pinError, setPinError] = useState(false);
-  const [authSuccess, setAuthSuccess] = useState(false);
-
   // Master PIN setup state
   const [showPinSetup, setShowPinSetup] = useState(false);
   const [newPin, setNewPin] = useState("");
@@ -144,7 +149,7 @@ export default function App() {
   // AppGuard Self-Lock Gate (Protects AppGuard itself from unauthorized access)
   const [isAppLocked, setIsAppLocked] = useState(false);
   const [selfLockPinInput, setSelfLockPinInput] = useState("");
-  const [selfLockPinError, setSelfLockPinError] = useState(false);
+  const [selfLockPinError, setSelfLockPinError] = useState<string | null>(null);
   const [selfLockAuthSuccess, setSelfLockAuthSuccess] = useState(false);
   const [lockAllSuccess, setLockAllSuccess] = useState(false);
 
@@ -167,6 +172,15 @@ export default function App() {
   const [changePinSuccess, setChangePinSuccess] = useState(false);
   const [settingsSaveFeedback, setSettingsSaveFeedback] = useState(false);
 
+  // Recovery Key & Audit Activity State
+  const [generatedRecoveryKey, setGeneratedRecoveryKey] = useState<string | null>(null);
+  const [showRecoveryModal, setShowRecoveryModal] = useState(false);
+  const [showRecoverAccountModal, setShowRecoverAccountModal] = useState(false);
+  const [recoverKeyInput, setRecoverKeyInput] = useState("");
+  const [recoverNewPinInput, setRecoverNewPinInput] = useState("");
+  const [recoverError, setRecoverError] = useState<string | null>(null);
+  const [activityLogs, setActivityLogs] = useState<AuditEvent[]>([]);
+
   useEffect(() => {
     localStorage.setItem("appguard_theme", currentTheme);
     document.body.style.backgroundColor = theme.colors.bgApp;
@@ -176,31 +190,6 @@ export default function App() {
   useEffect(() => {
     initApp();
 
-    const unlistenPromise = listen<{ bundle_id: string; name: string }>(
-      "app-locked-triggered",
-      (event) => {
-        setLockedTrigger(event.payload);
-        setPinInput("");
-        setPinError(false);
-        setAuthSuccess(false);
-
-        // Auto-trigger biometric dialog without requiring manual click
-        setTimeout(() => {
-          invoke<boolean>("authenticate_biometrics", {
-            reason: `Unlock ${event.payload.name}`,
-          })
-            .then((success) => {
-              if (success) {
-                completeUnlock(event.payload.bundle_id);
-              }
-            })
-            .catch(() => {
-              // User cancelled Touch ID or fell back to PIN
-            });
-        }, 150);
-      }
-    );
-
     const unlistenLocked = listen("sessions-locked", () => {
       setIsAppLocked(true);
       setLockAllSuccess(true);
@@ -208,7 +197,6 @@ export default function App() {
     });
 
     return () => {
-      unlistenPromise.then((unlisten) => unlisten());
       unlistenLocked.then((unlisten) => unlisten());
     };
   }, []);
@@ -240,6 +228,7 @@ export default function App() {
 
       loadInstalledApps();
       loadVaults();
+      loadActivityLogs();
 
       try {
         const auto = await isEnabled();
@@ -249,6 +238,53 @@ export default function App() {
       }
     } catch (e) {
       console.error("Failed to initialize AppGuard:", e);
+    }
+  }
+
+  async function loadActivityLogs() {
+    try {
+      const logs = await invoke<AuditEvent[]>("get_activity_log");
+      setActivityLogs(logs);
+    } catch (e) {
+      console.error("Failed to load activity logs:", e);
+    }
+  }
+
+  async function handleGenerateRecoveryKey() {
+    try {
+      const key = await invoke<string>("generate_recovery_key");
+      setGeneratedRecoveryKey(key);
+      setShowRecoveryModal(true);
+      const cfg = await invoke<AppGuardConfig>("get_config");
+      setConfig(cfg);
+      loadActivityLogs();
+    } catch (e: any) {
+      alert("Failed to generate recovery key: " + String(e));
+    }
+  }
+
+  async function handleRecoverAccount(e: React.FormEvent) {
+    e.preventDefault();
+    setRecoverError(null);
+    if (!recoverKeyInput || !recoverNewPinInput) return;
+    if (recoverNewPinInput.length < 4) {
+      setRecoverError("New PIN must be at least 4 digits");
+      return;
+    }
+
+    try {
+      await invoke("verify_recovery_key", {
+        key: recoverKeyInput,
+        newPin: recoverNewPinInput,
+      });
+      setShowRecoverAccountModal(false);
+      setIsAppLocked(false);
+      setHasPin(true);
+      setRecoverKeyInput("");
+      setRecoverNewPinInput("");
+      loadActivityLogs();
+    } catch (err: any) {
+      setRecoverError(String(err) || "Invalid recovery key");
     }
   }
 
@@ -368,37 +404,6 @@ export default function App() {
     }
   }
 
-  async function handleBiometricUnlock() {
-    try {
-      const success = await invoke<boolean>("authenticate_biometrics", {
-        reason: `Unlock ${lockedTrigger?.name || "Application"}`,
-      });
-      if (success && lockedTrigger) {
-        completeUnlock(lockedTrigger.bundle_id);
-      }
-    } catch (e) {
-      console.error("Biometrics failed:", e);
-      setPinError(true);
-    }
-  }
-
-  async function handlePinSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    if (!pinInput) return;
-
-    try {
-      const valid = await invoke<boolean>("verify_pin", { pin: pinInput });
-      if (valid && lockedTrigger) {
-        completeUnlock(lockedTrigger.bundle_id);
-      } else {
-        setPinError(true);
-        setPinInput("");
-      }
-    } catch (e) {
-      setPinError(true);
-    }
-  }
-
   async function handleSelfLockBiometric() {
     try {
       const authLabel = biometrics?.biometric_type === "SystemPassword"
@@ -416,9 +421,9 @@ export default function App() {
           setSelfLockAuthSuccess(false);
         }, 500);
       }
-    } catch (e) {
+    } catch (e: any) {
       console.error("Self-lock biometric failed:", e);
-      setSelfLockPinError(true);
+      setSelfLockPinError(String(e) || "Biometric authentication failed");
     }
   }
 
@@ -434,31 +439,15 @@ export default function App() {
           setIsAppLocked(false);
           setSelfLockAuthSuccess(false);
           setSelfLockPinInput("");
+          setSelfLockPinError(null);
         }, 500);
       } else {
-        setSelfLockPinError(true);
+        setSelfLockPinError("Incorrect master PIN");
         setSelfLockPinInput("");
       }
-    } catch (e) {
-      setSelfLockPinError(true);
-    }
-  }
-
-  async function completeUnlock(bundle_id: string) {
-    setAuthSuccess(true);
-    await invoke("unlock_app_session", { bundleId: bundle_id });
-    setTimeout(() => {
-      setLockedTrigger(null);
-      setAuthSuccess(false);
-    }, 600);
-  }
-
-  async function handleCancelLockedTrigger() {
-    if (lockedTrigger) {
-      await invoke("close_locked_application", { bundleId: lockedTrigger.bundle_id });
-      setLockedTrigger(null);
-      setPinInput("");
-      setPinError(false);
+    } catch (err: any) {
+      setSelfLockPinError(String(err) || "Incorrect master PIN");
+      setSelfLockPinInput("");
     }
   }
 
@@ -1815,123 +1804,150 @@ export default function App() {
                   </div>
                 </div>
               </div>
+
+              {/* Section 6: Emergency Recovery Key Management */}
+              <div
+                className="p-6 rounded-2xl border space-y-4"
+                style={{
+                  backgroundColor: theme.colors.bgCard,
+                  borderColor: theme.colors.borderCard,
+                }}
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div
+                      className="w-10 h-10 rounded-xl flex items-center justify-center text-white"
+                      style={{ backgroundColor: theme.colors.accent }}
+                    >
+                      <AlertTriangle className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <h4 className="font-bold text-sm" style={{ color: theme.colors.textPrimary }}>
+                          Emergency Recovery Key
+                        </h4>
+                        <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-500 border border-emerald-500/20">
+                          {config?.recovery_key_hash ? "Enrolled" : "Not Generated"}
+                        </span>
+                      </div>
+                      <p className="text-xs" style={{ color: theme.colors.textSecondary }}>
+                        One-time cryptographic key to restore your vault and PIN if you forget your Master PIN.
+                      </p>
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={handleGenerateRecoveryKey}
+                    className="py-2.5 px-4 rounded-xl text-xs font-semibold cursor-pointer border transition-all hover:opacity-90 shadow-xs"
+                    style={{
+                      borderColor: theme.colors.border,
+                      backgroundColor: isLight ? "#f8fafc" : "rgba(255,255,255,0.04)",
+                      color: theme.colors.accent,
+                    }}
+                  >
+                    {config?.recovery_key_hash ? "Regenerate Key" : "Generate Key"}
+                  </button>
+                </div>
+              </div>
+
+              {/* Section 7: Security Activity Audit History */}
+              <div
+                className="p-6 rounded-2xl border space-y-4"
+                style={{
+                  backgroundColor: theme.colors.bgCard,
+                  borderColor: theme.colors.borderCard,
+                }}
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div
+                      className="w-10 h-10 rounded-xl flex items-center justify-center text-white"
+                      style={{ backgroundColor: theme.colors.accent }}
+                    >
+                      <History className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h4 className="font-bold text-sm" style={{ color: theme.colors.textPrimary }}>
+                        Security Activity History
+                      </h4>
+                      <p className="text-xs" style={{ color: theme.colors.textSecondary }}>
+                        Real-time log of blocked applications, unlocks, and vault operations.
+                      </p>
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={loadActivityLogs}
+                    className="py-2 px-3 rounded-lg text-xs font-semibold cursor-pointer border transition-all hover:opacity-80 flex items-center gap-1.5"
+                    style={{
+                      borderColor: theme.colors.border,
+                      backgroundColor: isLight ? "#f8fafc" : "rgba(255,255,255,0.04)",
+                      color: theme.colors.textSecondary,
+                    }}
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>Refresh</span>
+                  </button>
+                </div>
+
+                <div
+                  className="max-h-60 overflow-y-auto space-y-2 pt-2 rounded-xl border p-2"
+                  style={{
+                    backgroundColor: isLight ? "#f8fafc" : "rgba(0,0,0,0.2)",
+                    borderColor: theme.colors.border,
+                  }}
+                >
+                  {activityLogs.length === 0 ? (
+                    <p className="text-xs text-center py-4 text-slate-500">
+                      No security events recorded yet.
+                    </p>
+                  ) : (
+                    activityLogs.map((log, idx) => (
+                      <div
+                        key={idx}
+                        className="p-2.5 rounded-lg border text-xs flex items-center justify-between"
+                        style={{
+                          backgroundColor: theme.colors.bgCard,
+                          borderColor: theme.colors.border,
+                        }}
+                      >
+                        <div className="flex items-center gap-2.5">
+                          <span
+                            className={`w-2 h-2 rounded-full ${
+                              log.severity === "critical"
+                                ? "bg-red-500"
+                                : log.severity === "warning"
+                                ? "bg-amber-500"
+                                : "bg-emerald-500"
+                            }`}
+                          />
+                          <div>
+                            <span className="font-medium" style={{ color: theme.colors.textPrimary }}>
+                              {log.description}
+                            </span>
+                            <span className="block text-[10px] text-slate-500 font-mono">
+                              Event: {log.event_type}
+                            </span>
+                          </div>
+                        </div>
+                        <span className="text-[10px] text-slate-400 font-mono">
+                          {new Date(log.timestamp * 1000).toLocaleTimeString([], {
+                            hour: "2-digit",
+                            minute: "2-digit",
+                            second: "2-digit",
+                          })}
+                        </span>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
             </div>
           )}
         </section>
       </main>
 
-      {/* Lock Trigger Modal */}
-      {lockedTrigger && (
-        <div
-          className="fixed inset-0 z-50 backdrop-blur-2xl flex items-center justify-center p-4 transition-all"
-          style={{ backgroundColor: theme.colors.bgOverlay }}
-        >
-          <div
-            className="w-full max-w-md rounded-2xl border p-8 shadow-2xl flex flex-col items-center text-center space-y-6"
-            style={{
-              backgroundColor: theme.colors.bgModal,
-              borderColor: theme.colors.border,
-            }}
-          >
-            <div
-              className="w-16 h-16 rounded-2xl flex items-center justify-center shadow-xl text-white"
-              style={{
-                backgroundColor: theme.colors.accent,
-                boxShadow: `0 12px 24px ${theme.colors.accentGlow}`,
-              }}
-            >
-              {authSuccess ? (
-                <CheckCircle2 className="w-8 h-8 text-white animate-bounce" />
-              ) : (
-                <ShieldAlert className="w-8 h-8 text-white" />
-              )}
-            </div>
 
-            <div>
-              <h3 className="text-xl font-bold" style={{ color: theme.colors.textPrimary }}>
-                {lockedTrigger.name} is Locked
-              </h3>
-              <p className="text-xs mt-1" style={{ color: theme.colors.textSecondary }}>
-                Biometric verification or Master PIN required to access
-              </p>
-            </div>
-
-            {biometrics?.is_available && (
-              <button
-                onClick={handleBiometricUnlock}
-                className="w-full py-3 px-4 rounded-xl font-semibold text-sm flex items-center justify-center gap-2 transition-all shadow-md cursor-pointer hover:opacity-95"
-                style={{
-                  backgroundColor: theme.colors.accent,
-                  color: theme.colors.accentText,
-                  boxShadow: `0 8px 16px ${theme.colors.accentGlow}`,
-                }}
-              >
-                {biometrics.biometric_type === "SystemPassword" ? (
-                  <KeyRound className="w-5 h-5" />
-                ) : (
-                  <Fingerprint className="w-5 h-5" />
-                )}
-                <span>
-                  {biometrics.biometric_type === "SystemPassword"
-                    ? "Verify with macOS Password"
-                    : `Verify with ${biometrics.biometric_type}`}
-                </span>
-              </button>
-            )}
-
-            <div className="w-full flex items-center gap-3">
-              <div className="flex-1 h-px" style={{ backgroundColor: theme.colors.border }} />
-              <span className="text-[11px] uppercase tracking-wider font-semibold" style={{ color: theme.colors.textMuted }}>
-                or enter PIN
-              </span>
-              <div className="flex-1 h-px" style={{ backgroundColor: theme.colors.border }} />
-            </div>
-
-            <form onSubmit={handlePinSubmit} className="w-full space-y-3">
-              <input
-                type="password"
-                maxLength={8}
-                placeholder="••••"
-                value={pinInput}
-                onChange={(e) => {
-                  setPinInput(e.target.value);
-                  setPinError(false);
-                }}
-                className="w-full text-center text-2xl tracking-[0.5em] py-2.5 rounded-xl border focus:outline-none"
-                style={{
-                  backgroundColor: theme.colors.bgInput,
-                  borderColor: pinError ? "#ef4444" : theme.colors.border,
-                  color: theme.colors.textPrimary,
-                }}
-                autoFocus
-              />
-              {pinError && (
-                <p className="text-xs text-red-500 font-medium">Incorrect master PIN</p>
-              )}
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={handleCancelLockedTrigger}
-                  className="flex-1 py-2.5 rounded-xl text-xs font-semibold transition-all cursor-pointer border text-red-600 dark:text-red-400 border-red-500/20 bg-red-500/10 hover:bg-red-500/20"
-                >
-                  Cancel & Close App
-                </button>
-                <button
-                  type="submit"
-                  className="flex-1 py-2.5 rounded-xl text-xs font-semibold transition-all cursor-pointer border"
-                  style={{
-                    backgroundColor: isLight ? "#f1f5f9" : "#1e293b",
-                    borderColor: theme.colors.border,
-                    color: theme.colors.textPrimary,
-                  }}
-                >
-                  Unlock with PIN
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
 
       {/* Master PIN Setup Modal */}
       {showPinSetup && (
@@ -2486,7 +2502,7 @@ export default function App() {
                 value={selfLockPinInput}
                 onChange={(e) => {
                   setSelfLockPinInput(e.target.value);
-                  setSelfLockPinError(false);
+                  setSelfLockPinError(null);
                 }}
                 className="w-full text-center text-2xl tracking-[0.5em] py-2.5 rounded-xl border focus:outline-none"
                 style={{
@@ -2497,7 +2513,7 @@ export default function App() {
                 autoFocus
               />
               {selfLockPinError && (
-                <p className="text-xs text-red-500 font-medium">Incorrect master PIN</p>
+                <p className="text-xs text-red-500 font-medium text-center">{selfLockPinError}</p>
               )}
               <button
                 type="submit"
@@ -2508,6 +2524,20 @@ export default function App() {
                 }}
               >
                 Unlock AppGuard
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setShowRecoverAccountModal(true);
+                  setRecoverError(null);
+                  setRecoverKeyInput("");
+                  setRecoverNewPinInput("");
+                }}
+                className="w-full text-[11px] hover:underline font-medium text-center pt-1 transition-all cursor-pointer"
+                style={{ color: theme.colors.textSecondary }}
+              >
+                Forgot PIN? Use Emergency Recovery Key
               </button>
             </form>
           </div>
@@ -2647,6 +2677,191 @@ export default function App() {
                   }}
                 >
                   Save New PIN
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Emergency Recovery Key Modal */}
+      {showRecoveryModal && generatedRecoveryKey && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xl flex items-center justify-center p-4">
+          <div
+            className="w-full max-w-md rounded-2xl border p-8 shadow-2xl space-y-6"
+            style={{
+              backgroundColor: theme.colors.bgModal,
+              borderColor: theme.colors.border,
+            }}
+          >
+            <div className="text-center space-y-2">
+              <div
+                className="w-14 h-14 rounded-2xl flex items-center justify-center mx-auto shadow-lg text-white"
+                style={{
+                  backgroundColor: theme.colors.accent,
+                  boxShadow: `0 8px 16px ${theme.colors.accentGlow}`,
+                }}
+              >
+                <Key className="w-7 h-7" />
+              </div>
+              <h3 className="text-xl font-bold tracking-tight" style={{ color: theme.colors.textPrimary }}>
+                Emergency Recovery Key
+              </h3>
+              <p className="text-xs" style={{ color: theme.colors.textSecondary }}>
+                Save this one-time emergency key in a safe place. You will need it to regain access if you forget your Master PIN.
+              </p>
+            </div>
+
+            <div
+              className="p-4 rounded-xl border font-mono text-center tracking-widest text-lg font-bold select-all"
+              style={{
+                backgroundColor: theme.colors.bgInput,
+                borderColor: theme.colors.border,
+                color: theme.colors.textPrimary,
+              }}
+            >
+              {generatedRecoveryKey}
+            </div>
+
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  navigator.clipboard.writeText(generatedRecoveryKey);
+                  alert("Recovery key copied to clipboard!");
+                }}
+                className="flex-1 py-2.5 rounded-xl text-xs font-semibold cursor-pointer border transition-all hover:opacity-80"
+                style={{
+                  borderColor: theme.colors.border,
+                  backgroundColor: isLight ? "#f8fafc" : "rgba(255,255,255,0.04)",
+                  color: theme.colors.textPrimary,
+                }}
+              >
+                Copy to Clipboard
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowRecoveryModal(false);
+                  setGeneratedRecoveryKey(null);
+                }}
+                className="flex-1 py-2.5 rounded-xl text-xs font-semibold shadow-md cursor-pointer text-white"
+                style={{
+                  backgroundColor: theme.colors.accent,
+                  boxShadow: `0 8px 16px ${theme.colors.accentGlow}`,
+                }}
+              >
+                I Have Saved It
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Recover Account with Key Modal */}
+      {showRecoverAccountModal && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xl flex items-center justify-center p-4">
+          <div
+            className="w-full max-w-md rounded-2xl border p-8 shadow-2xl space-y-6"
+            style={{
+              backgroundColor: theme.colors.bgModal,
+              borderColor: theme.colors.border,
+            }}
+          >
+            <div className="text-center space-y-2">
+              <div
+                className="w-14 h-14 rounded-2xl flex items-center justify-center mx-auto shadow-lg text-white"
+                style={{
+                  backgroundColor: theme.colors.accent,
+                  boxShadow: `0 8px 16px ${theme.colors.accentGlow}`,
+                }}
+              >
+                <Key className="w-7 h-7" />
+              </div>
+              <h3 className="text-xl font-bold tracking-tight" style={{ color: theme.colors.textPrimary }}>
+                Account Recovery
+              </h3>
+              <p className="text-xs" style={{ color: theme.colors.textSecondary }}>
+                Enter your emergency recovery key and set a new Master PIN.
+              </p>
+            </div>
+
+            <form onSubmit={handleRecoverAccount} className="space-y-4">
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold" style={{ color: theme.colors.textPrimary }}>
+                  Emergency Recovery Key
+                </label>
+                <input
+                  type="text"
+                  placeholder="AG-XXXX-XXXX-XXXX"
+                  value={recoverKeyInput}
+                  onChange={(e) => {
+                    setRecoverKeyInput(e.target.value.toUpperCase());
+                    setRecoverError(null);
+                  }}
+                  className="w-full py-2.5 px-3 rounded-xl border text-sm font-mono focus:outline-none"
+                  style={{
+                    backgroundColor: theme.colors.bgInput,
+                    borderColor: theme.colors.border,
+                    color: theme.colors.textPrimary,
+                  }}
+                  required
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold" style={{ color: theme.colors.textPrimary }}>
+                  New Master PIN (4–8 digits)
+                </label>
+                <input
+                  type="password"
+                  maxLength={8}
+                  placeholder="••••"
+                  value={recoverNewPinInput}
+                  onChange={(e) => {
+                    setRecoverNewPinInput(e.target.value);
+                    setRecoverError(null);
+                  }}
+                  className="w-full text-center text-xl tracking-[0.4em] py-2.5 rounded-xl border focus:outline-none"
+                  style={{
+                    backgroundColor: theme.colors.bgInput,
+                    borderColor: theme.colors.border,
+                    color: theme.colors.textPrimary,
+                  }}
+                  required
+                />
+              </div>
+
+              {recoverError && (
+                <p className="text-xs text-red-500 font-medium text-center">{recoverError}</p>
+              )}
+
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowRecoverAccountModal(false);
+                    setRecoverError(null);
+                    setRecoverKeyInput("");
+                    setRecoverNewPinInput("");
+                  }}
+                  className="flex-1 py-2.5 rounded-xl text-xs font-semibold cursor-pointer border"
+                  style={{
+                    borderColor: theme.colors.border,
+                    color: theme.colors.textSecondary,
+                  }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="flex-1 py-2.5 rounded-xl text-xs font-semibold shadow-md cursor-pointer text-white"
+                  style={{
+                    backgroundColor: theme.colors.accent,
+                    boxShadow: `0 8px 16px ${theme.colors.accentGlow}`,
+                  }}
+                >
+                  Reset PIN & Unlock
                 </button>
               </div>
             </form>
