@@ -14,6 +14,49 @@ Official Website & Downloads: [appguard.novitasweb.works](https://appguard.novit
 
 ---
 
+## 📸 Visual Overview
+
+### 1. Instant App Shielding & Biometric Interception
+When you launch or switch to a protected app, AppGuard instantly cloaks the target window and displays a minimal, floating authentication prompt right above it. Authenticate via **Touch ID / Windows Hello** or enter your Master PIN to unlock:
+
+<p align="center">
+  <img src="docs/images/compact-auth-panel.png" alt="Compact Floating Auth Panel" width="460" />
+</p>
+<p align="center"><em>Sub-5ms floating biometric prompt — zero disruption, zero dashboard popup</em></p>
+
+---
+
+### 2. Full Security Dashboard & Management
+
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <strong>🛡️ Application Protection Manager</strong><br /><br />
+      <img src="docs/images/dashboard-apps.png" alt="App Protection Engine" width="100%" />
+      <p align="left"><em>Scan and toggle hardware biometric protection for any installed app in one click.</em></p>
+    </td>
+    <td width="50%" align="center">
+      <strong>🔐 Encrypted Folder Vaults (AES-256-GCM)</strong><br /><br />
+      <img src="docs/images/dashboard-vault.png" alt="Encrypted Folder Vaults" width="100%" />
+      <p align="left"><em>Cloak and encrypt confidential folders with local hardware-accelerated AES-256-GCM.</em></p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <strong>🎨 7 Handcrafted Color Palettes</strong><br /><br />
+      <img src="docs/images/dashboard-themes.png" alt="Appearance & Themes" width="100%" />
+      <p align="left"><em>Ergonomic light & high-contrast cyber dark themes with automatic OS appearance synchronization.</em></p>
+    </td>
+    <td width="50%" align="center">
+      <strong>⚙️ Security Policy & Preferences</strong><br /><br />
+      <img src="docs/images/dashboard-settings.png" alt="Security Policies & Preferences" width="100%" />
+      <p align="left"><em>Self-defense locks, idle grace periods, tamper-proof OS watchdog, and audit trail history.</em></p>
+    </td>
+  </tr>
+</table>
+
+---
+
 ## ✨ Features
 
 - **⚡ Sub-5ms Window Intercept:** Native background watchdog daemon intercepts protected process activations (macOS `NSWorkspace`, Windows Foreground hooks, Linux D-Bus/X11) before window rendering occurs.
