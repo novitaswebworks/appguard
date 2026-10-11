@@ -1464,10 +1464,13 @@ export default function App() {
                     <div>
                       <div className="flex items-center gap-2">
                         <span className="text-xs font-semibold" style={{ color: theme.colors.textPrimary }}>
-                          Tamper-Proof OS Watchdog (Auto-Resurrect)
+                          OS Watchdog Protection (Auto-Resurrect)
                         </span>
-                        <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-amber-500/10 text-amber-500 border border-amber-500/20">
-                          Cross-Platform
+                        <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-blue-500/10 text-blue-500 border border-blue-500/20">
+                          macOS Flagship
+                        </span>
+                        <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-500/10 text-amber-500 border border-amber-500/20">
+                          Win/Linux Preview
                         </span>
                       </div>
                       <p className="text-[11px]" style={{ color: theme.colors.textSecondary }}>

@@ -73,7 +73,12 @@ pub fn start_focus_watchdog(app_handle: AppHandle, security: Arc<SecurityManager
                             }),
                         );
 
-                        if let Some(window) = app_handle.get_webview_window("main") {
+                        // Prefer showing compact 'auth' floating window (Option A); fallback to 'main' only if needed
+                        let target_window = app_handle
+                            .get_webview_window("auth")
+                            .or_else(|| app_handle.get_webview_window("main"));
+
+                        if let Some(window) = target_window {
                             let _ = window.show();
                             let _ = window.unminimize();
                             let _ = window.set_always_on_top(true);

@@ -187,10 +187,14 @@ fn unlock_app_session(
         }
     }
 
-    // Release always-on-top and hide AppGuard window so focus returns to the unlocked app
-    if let Some(window) = app_handle.get_webview_window("main") {
-        let _ = window.set_always_on_top(false);
-        let _ = window.hide();
+    // Release always-on-top and hide both auth and main windows so focus returns to the unlocked app
+    if let Some(auth_win) = app_handle.get_webview_window("auth") {
+        let _ = auth_win.set_always_on_top(false);
+        let _ = auth_win.hide();
+    }
+    if let Some(main_win) = app_handle.get_webview_window("main") {
+        let _ = main_win.set_always_on_top(false);
+        let _ = main_win.hide();
     }
     Ok(true)
 }

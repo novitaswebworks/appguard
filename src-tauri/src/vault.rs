@@ -91,8 +91,8 @@ fn encrypt_directory_recursive(dir: &Path, cipher: &Aes256Gcm) -> Result<(), Str
         let path = entry.path();
         if path.is_file() {
             let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            // Skip hidden status file or already encrypted vault files
-            if filename == ".appguard_status" || filename.ends_with(VAULT_EXT) {
+            // Skip hidden status file, temporary staging files, or already encrypted vault files
+            if filename == ".appguard_status" || filename.ends_with(VAULT_EXT) || filename.ends_with(".staging") {
                 continue;
             }
 
@@ -106,7 +106,7 @@ fn encrypt_directory_recursive(dir: &Path, cipher: &Aes256Gcm) -> Result<(), Str
                 .encrypt(&nonce, plaintext.as_ref())
                 .map_err(|e| format!("Encryption failed: {e}"))?;
 
-            // Store nonce (12 bytes) + ciphertext in .appguard_vault
+            // Store nonce (12 bytes) + ciphertext
             let mut payload = Vec::with_capacity(NONCE_SIZE + ciphertext.len());
             payload.extend_from_slice(&nonce_bytes);
             payload.extend_from_slice(&ciphertext);
@@ -115,8 +115,22 @@ fn encrypt_directory_recursive(dir: &Path, cipher: &Aes256Gcm) -> Result<(), Str
                 "{}{VAULT_EXT}",
                 path.extension().and_then(|s| s.to_str()).unwrap_or("")
             ));
+            let staging_path = encrypted_path.with_extension("staging");
 
-            fs::write(&encrypted_path, payload).map_err(|e| e.to_string())?;
+            // Transaction step 1: Write to staging file and flush to disk
+            fs::write(&staging_path, &payload).map_err(|e| e.to_string())?;
+
+            // Transaction step 2: Verify written file matches payload
+            let written_len = fs::metadata(&staging_path).map(|m| m.len()).unwrap_or(0);
+            if written_len != payload.len() as u64 {
+                let _ = fs::remove_file(&staging_path);
+                return Err("Vault transaction failed: staging file size mismatch".into());
+            }
+
+            // Transaction step 3: Atomically rename staging file into place
+            fs::rename(&staging_path, &encrypted_path).map_err(|e| e.to_string())?;
+
+            // Transaction step 4: Only now delete original plaintext file safely
             let _ = fs::remove_file(&path);
         } else if path.is_dir() {
             encrypt_directory_recursive(&path, cipher)?;
@@ -152,8 +166,22 @@ fn decrypt_directory_recursive(dir: &Path, cipher: &Aes256Gcm) -> Result<(), Str
                 // Strip .appguard_vault suffix
                 let restored_path_str = path_str.trim_end_matches(VAULT_EXT);
                 let restored_path = PathBuf::from(restored_path_str);
+                let staging_path = restored_path.with_extension("staging_dec");
 
-                fs::write(&restored_path, plaintext).map_err(|e| e.to_string())?;
+                // Transaction step 1: Write decrypted plaintext to staging file
+                fs::write(&staging_path, &plaintext).map_err(|e| e.to_string())?;
+
+                // Transaction step 2: Verify decrypted length
+                let written_len = fs::metadata(&staging_path).map(|m| m.len()).unwrap_or(0);
+                if written_len != plaintext.len() as u64 {
+                    let _ = fs::remove_file(&staging_path);
+                    return Err("Vault transaction failed: decrypted size mismatch".into());
+                }
+
+                // Transaction step 3: Atomically rename staging file to restored path
+                fs::rename(&staging_path, &restored_path).map_err(|e| e.to_string())?;
+
+                // Transaction step 4: Only now delete encrypted container file
                 let _ = fs::remove_file(&path);
             }
         } else if path.is_dir() {

@@ -18,6 +18,18 @@
         "height": 680,
         "minWidth": 800,
         "minHeight": 560
+      },
+      {
+        "label": "auth",
+        "title": "AppGuard Verification",
+        "width": 380,
+        "height": 330,
+        "resizable": false,
+        "alwaysOnTop": true,
+        "visible": false,
+        "center": true,
+        "decorations": false,
+        "transparent": true
       }
     ],
     "security": {

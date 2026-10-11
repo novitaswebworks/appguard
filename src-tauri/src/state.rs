@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -80,9 +81,26 @@ impl SecurityManager {
         let config_dir = dirs_config_dir().unwrap_or_else(|| PathBuf::from("."));
         let _ = fs::create_dir_all(&config_dir);
         let config_path = config_dir.join("appguard_config.json");
+        let backup_path = config_dir.join("appguard_config.json.bak");
 
+        // Attempt primary config load; if corrupt, fallback to backup
         let config = if config_path.exists() {
-            fs::read_to_string(&config_path)
+            match fs::read_to_string(&config_path) {
+                Ok(data) => serde_json::from_str(&data).unwrap_or_else(|err| {
+                    eprintln!("Warning: primary config corrupted ({err}), checking backup...");
+                    if backup_path.exists() {
+                        fs::read_to_string(&backup_path)
+                            .ok()
+                            .and_then(|bak_data| serde_json::from_str(&bak_data).ok())
+                            .unwrap_or_default()
+                    } else {
+                        AppGuardConfig::default()
+                    }
+                }),
+                Err(_) => AppGuardConfig::default(),
+            }
+        } else if backup_path.exists() {
+            fs::read_to_string(&backup_path)
                 .ok()
                 .and_then(|data| serde_json::from_str(&data).ok())
                 .unwrap_or_default()
@@ -117,7 +135,24 @@ impl SecurityManager {
     pub fn save(&self) -> Result<(), String> {
         let serialized = serde_json::to_string_pretty(&*self.config.read())
             .map_err(|e| e.to_string())?;
-        fs::write(&self.config_path, serialized).map_err(|e| e.to_string())
+
+        let tmp_path = self.config_path.with_extension("tmp");
+        let bak_path = self.config_path.with_extension("json.bak");
+
+        // 1. Write to temporary file and sync bytes to disk
+        let mut file = fs::File::create(&tmp_path).map_err(|e| e.to_string())?;
+        file.write_all(serialized.as_bytes()).map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+        drop(file);
+
+        // 2. Backup existing config file before overwrite
+        if self.config_path.exists() {
+            let _ = fs::copy(&self.config_path, &bak_path);
+        }
+
+        // 3. Atomically rename .tmp to primary config path
+        fs::rename(&tmp_path, &self.config_path).map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     pub fn set_master_pin(&self, pin: &str) -> Result<(), String> {
