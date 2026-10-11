@@ -1,7 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ShieldAlert, CheckCircle2, Fingerprint, KeyRound, X, Clock } from "lucide-react";
 
 interface LockedAppPayload {
@@ -68,8 +67,7 @@ export function CompactAuthPanel() {
     setTimeout(async () => {
       setSuccess(false);
       setLockedApp(null);
-      const win = getCurrentWindow();
-      await win.hide();
+      await invoke("hide_auth_window");
     }, 400);
   }
 
@@ -97,8 +95,7 @@ export function CompactAuthPanel() {
     }
     setLockedApp(null);
     setPin("");
-    const win = getCurrentWindow();
-    await win.hide();
+    await invoke("hide_auth_window");
   }
 
   return (

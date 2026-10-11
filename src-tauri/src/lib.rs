@@ -276,7 +276,15 @@ fn lock_all_sessions(
 }
 
 #[tauri::command]
-fn close_locked_application(_bundle_id: String) -> Result<bool, String> {
+fn close_locked_application(
+    _bundle_id: String,
+    app_handle: tauri::AppHandle,
+) -> Result<bool, String> {
+    if let Some(auth_win) = app_handle.get_webview_window("auth") {
+        let _ = auth_win.set_always_on_top(false);
+        let _ = auth_win.hide();
+    }
+
     #[cfg(target_os = "macos")]
     {
         use objc2::msg_send;
@@ -308,6 +316,15 @@ fn close_locked_application(_bundle_id: String) -> Result<bool, String> {
         }
     }
     Ok(true)
+}
+
+#[tauri::command]
+fn hide_auth_window(app_handle: tauri::AppHandle) -> bool {
+    if let Some(auth_win) = app_handle.get_webview_window("auth") {
+        let _ = auth_win.set_always_on_top(false);
+        let _ = auth_win.hide();
+    }
+    true
 }
 
 #[tauri::command]
@@ -506,6 +523,7 @@ pub fn run() {
             is_recovery_configured,
             verify_recovery_key,
             get_activity_log,
+            hide_auth_window,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
