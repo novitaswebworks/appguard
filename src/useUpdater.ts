@@ -4,7 +4,7 @@ import { getVersion } from "@tauri-apps/api/app";
 
 const GITHUB_REPO = "novitaswebworks/appguard";
 const LATEST_RELEASE_API = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`;
-const FALLBACK_VERSION = "0.6.0";
+const FALLBACK_VERSION = "0.7.0";
 const LAST_CHECK_KEY = "appguard:updater:last_check";
 const CHECK_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 
