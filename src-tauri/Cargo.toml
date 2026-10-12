@@ -1,6 +1,6 @@
 [package]
 name = "appguard"
-version = "0.8.0-beta.1"
+version = "0.8.0-beta.2"
 description = "Biometric Lock & Privacy Vault for Apps and Folders"
 authors = ["AppGuard Authors"]
 edition = "2024"

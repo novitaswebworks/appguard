@@ -54,7 +54,9 @@ jobs:
           - platform: 'ubuntu-24.04-arm'
             args: '--bundles deb,appimage'
           - platform: 'windows-latest'
-            args: '--bundles msi,nsis'
+            # WiX MSI requires numeric-only prerelease identifiers. Beta
+            # tags use NSIS; stable tags publish both installers.
+            args: ${{ contains(github.ref_name, '-') && '--bundles nsis' || '--bundles msi,nsis' }}
 
     runs-on: ${{ matrix.platform }}
     steps:

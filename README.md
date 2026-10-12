@@ -2,7 +2,7 @@
 
 > **Desktop window shielding and an encrypted file vault, built with Tauri, React, and Rust.**
 
-[![Version](https://img.shields.io/badge/version-0.8.0--beta.1-emerald.svg)](https://github.com/novitaswebworks/appguard/releases)
+[![Version](https://img.shields.io/badge/version-0.8.0--beta.2-emerald.svg)](https://github.com/novitaswebworks/appguard/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey.svg)](#platform-support)
 [![Architecture](https://img.shields.io/badge/arch-Rust%202024%20%2B%20Tauri%202-orange.svg)](#architecture)
@@ -105,7 +105,7 @@ brew install --cask novitaswebworks/tap/appguard
 ```
 
 #### Universal DMG
-Download the latest `AppGuard_0.8.0-beta.1_universal.dmg` from the [GitHub Releases](https://github.com/novitaswebworks/appguard/releases) page. Mount the disk image and drag **AppGuard** into your `/Applications` directory.
+Download the latest `AppGuard_0.8.0-beta.2_universal.dmg` from the [GitHub Releases](https://github.com/novitaswebworks/appguard/releases) page. Mount the disk image and drag **AppGuard** into your `/Applications` directory.
 
 > **macOS Permissions:** AppGuard requires *Accessibility* permissions to monitor application window switching and shield protected applications. Grant this in `System Settings → Privacy & Security → Accessibility`.
 
@@ -122,22 +122,22 @@ Download the beta Windows installer from [Releases](https://github.com/novitaswe
 #### AppImage
 ```bash
 # For x86_64:
-chmod +x AppGuard_0.8.0-beta.1_amd64.AppImage
-./AppGuard_0.8.0-beta.1_amd64.AppImage
+chmod +x AppGuard_0.8.0-beta.2_amd64.AppImage
+./AppGuard_0.8.0-beta.2_amd64.AppImage
 
 # For ARM64 (Raspberry Pi 4/5, Asahi Linux, ARM laptops):
-chmod +x AppGuard_0.8.0-beta.1_aarch64.AppImage
-./AppGuard_0.8.0-beta.1_aarch64.AppImage
+chmod +x AppGuard_0.8.0-beta.2_aarch64.AppImage
+./AppGuard_0.8.0-beta.2_aarch64.AppImage
 ```
 
 #### Debian / Ubuntu (.deb)
 ```bash
 # For x86_64:
-sudo dpkg -i AppGuard_0.8.0-beta.1_amd64.deb
+sudo dpkg -i AppGuard_0.8.0-beta.2_amd64.deb
 sudo apt-get install -f
 
 # For ARM64:
-sudo dpkg -i AppGuard_0.8.0-beta.1_arm64.deb
+sudo dpkg -i AppGuard_0.8.0-beta.2_arm64.deb
 sudo apt-get install -f
 ```
 
