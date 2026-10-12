@@ -1,248 +1,92 @@
-import React, { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { ShieldAlert, CheckCircle2, Fingerprint, KeyRound, X, Clock } from "lucide-react";
+import { ShieldAlert, Fingerprint, X } from "lucide-react";
 
-interface LockedAppPayload {
-  bundle_id: string;
-  name: string;
-}
+interface Target { bundle_id: string; name: string; request_id: number }
 
 export function CompactAuthPanel() {
-  const [lockedApp, setLockedApp] = useState<LockedAppPayload | null>(null);
+  const [target, setTarget] = useState<Target | null>(null);
   const [pin, setPin] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const inFlight = useRef(false);
   const [bioAvailable, setBioAvailable] = useState(false);
-  const [bioType, setBioType] = useState("Touch ID");
-  const [temporaryOption, setTemporaryOption] = useState<number | null>(null); // null = session grace period, 300 = 5m
+  const [duration, setDuration] = useState<number | null>(null);
 
   useEffect(() => {
-    // Check available biometrics
-    invoke<{ is_available: boolean; biometric_type: string }>("check_biometrics")
-      .then((status) => {
-        setBioAvailable(status.is_available);
-        setBioType(status.biometric_type || "Touch ID");
-      })
-      .catch(() => {});
-
-    // Poll/query pending locked target immediately on mount
-    const fetchPendingTarget = async () => {
-      try {
-        const target = await invoke<LockedAppPayload | null>("get_locked_app_target");
-        if (target) {
-          setLockedApp(target);
-          setPin("");
-          setError(null);
-          setSuccess(false);
-          setTemporaryOption(null);
-        }
-      } catch {}
+    let disposed = false;
+    let revision = 0;
+    const update = (next: Target | null) => {
+      if (!disposed) setTarget((current) => current?.request_id === next?.request_id ? current : next);
     };
-    fetchPendingTarget();
-
-    // Also re-query whenever window gains focus
-    window.addEventListener("focus", fetchPendingTarget);
-
-    // Listen for locked application event
-    const unlistenPromise = listen<LockedAppPayload>("app-locked-triggered", (event) => {
-      setLockedApp(event.payload);
-      setPin("");
-      setError(null);
-      setSuccess(false);
-      setTemporaryOption(null);
-    });
-
-    return () => {
-      window.removeEventListener("focus", fetchPendingTarget);
-      unlistenPromise.then((unlisten) => unlisten());
+    const refresh = () => {
+      const current = ++revision;
+      invoke<Target | null>("get_locked_app_target").then((next) => {
+        if (current === revision) update(next);
+      }).catch((err) => { if (!disposed) setError(String(err)); });
     };
+    const unlisten = listen<Target>("app-locked-triggered", (event) => { revision += 1; update(event.payload); });
+    invoke<{ is_available: boolean }>("check_biometrics").then((value) => { if (!disposed) setBioAvailable(value.is_available); }).catch(() => setBioAvailable(false));
+    refresh(); window.addEventListener("focus", refresh);
+    return () => { disposed = true; window.removeEventListener("focus", refresh); void unlisten.then((stop) => stop()); };
   }, []);
 
-  async function handleBiometricAuth(bundleId: string, appName: string) {
+  useEffect(() => { setPin(""); setError(null); setDuration(null); }, [target?.request_id]);
+
+  async function authenticate(useBiometrics: boolean) {
+    if (!target || inFlight.current) return;
+    inFlight.current = true; setBusy(true); setError(null);
+    const current = target;
     try {
-      setError(null);
-      const ok = await invoke<boolean>("authenticate_biometrics", {
-        reason: `Unlock ${appName}`,
+      const ok = await invoke<boolean>("authenticate_target", {
+        bundleId: current.bundle_id, requestId: current.request_id, pin: useBiometrics ? null : pin,
       });
-      if (ok) {
-        completeUnlock(bundleId);
-      }
-    } catch {
-      // User cancelled Touch ID or fell back to PIN
-    }
+      if (!ok) { setError("Incorrect Master PIN"); return; }
+      await invoke("unlock_app_session", {
+        bundleId: current.bundle_id, requestId: current.request_id, durationSecs: duration,
+      });
+      setTarget((next) => next?.request_id === current.request_id ? null : next);
+    } catch (err) { setError(String(err)); }
+    finally { setPin(""); setBusy(false); inFlight.current = false; }
   }
 
-  async function completeUnlock(bundleId: string) {
-    setSuccess(true);
-    await invoke("unlock_app_session", {
-      bundleId,
-      durationSecs: temporaryOption,
-    });
-    setTimeout(async () => {
-      setSuccess(false);
-      setLockedApp(null);
-      await invoke("hide_auth_window");
-    }, 400);
-  }
-
-  async function handlePinSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    if (!pin || !lockedApp) return;
-
+  async function cancel() {
+    if (inFlight.current) return;
+    inFlight.current = true; setBusy(true);
     try {
-      const valid = await invoke<boolean>("verify_pin", { pin });
-      if (valid) {
-        completeUnlock(lockedApp.bundle_id);
-      } else {
-        setError("Incorrect Master PIN");
-        setPin("");
-      }
-    } catch (err: any) {
-      setError(String(err) || "Incorrect Master PIN");
-      setPin("");
-    }
+      if (target) await invoke("close_locked_application", { bundleId: target.bundle_id, requestId: target.request_id });
+      else await invoke("hide_auth_window");
+      setTarget(null); setPin("");
+    } catch (err) { setError(String(err)); }
+    finally { setBusy(false); inFlight.current = false; }
   }
 
-  async function handleCancel() {
-    if (lockedApp) {
-      await invoke("close_locked_application", { bundleId: lockedApp.bundle_id });
-    }
-    setLockedApp(null);
-    setPin("");
-    await invoke("hide_auth_window");
-  }
+  function submit(event: FormEvent) { event.preventDefault(); if (pin) void authenticate(false); }
 
   return (
-    <div className="w-full h-full select-none flex items-center justify-center p-2 bg-transparent font-sans">
-      <div className="w-[340px] rounded-2xl border border-white/10 bg-slate-900/95 backdrop-blur-2xl shadow-2xl p-4 text-white flex flex-col items-center relative overflow-hidden">
-        {/* Close Button */}
-        <button
-          onClick={handleCancel}
-          className="absolute top-2.5 right-2.5 text-slate-400 hover:text-white p-1 rounded-lg hover:bg-white/10 transition-colors cursor-pointer"
-        >
-          <X className="w-3.5 h-3.5" />
-        </button>
-
-        {/* Status Shield Icon */}
-        <div className="w-10 h-10 rounded-xl flex items-center justify-center shadow-lg mb-2 bg-indigo-500/20 text-indigo-400 border border-indigo-500/30">
-          {success ? (
-            <CheckCircle2 className="w-5 h-5 text-emerald-400 animate-bounce" />
-          ) : (
-            <ShieldAlert className="w-5 h-5 text-indigo-400" />
-          )}
-        </div>
-
-        {/* Target App Title */}
-        <h2 className="text-sm font-bold text-center tracking-tight text-white mb-0.5 truncate max-w-[280px]">
-          {lockedApp ? lockedApp.name : "Protected Application"}
-        </h2>
-        <p className="text-[10px] text-slate-400 text-center mb-3">
-          Verification required to access
-        </p>
-
-        {/* Biometric Button */}
-        {bioAvailable && (
-          <button
-            onClick={() => lockedApp && handleBiometricAuth(lockedApp.bundle_id, lockedApp.name)}
-            className="w-full py-2 px-3 mb-2 rounded-xl font-semibold text-xs flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white shadow-md transition-all cursor-pointer"
-          >
-            {bioType === "SystemPassword" ? (
-              <KeyRound className="w-3.5 h-3.5" />
-            ) : (
-              <Fingerprint className="w-3.5 h-3.5" />
-            )}
-            <span>
-              {bioType === "SystemPassword"
-                ? "Verify with System Password"
-                : `Unlock with ${bioType}`}
-            </span>
-          </button>
-        )}
-
-        {/* Divider */}
-        {bioAvailable && (
-          <div className="w-full flex items-center gap-2 mb-2">
-            <div className="flex-1 h-px bg-white/10" />
-            <span className="text-[9px] uppercase font-bold tracking-wider text-slate-500">
-              or enter PIN
-            </span>
-            <div className="flex-1 h-px bg-white/10" />
-          </div>
-        )}
-
-        {/* Temporary Unlock Selector */}
-        <div className="w-full flex items-center justify-between mb-2 px-1">
-          <span className="text-[10px] text-slate-400 flex items-center gap-1">
-            <Clock className="w-3 h-3 text-slate-500" />
-            Unlock Duration:
-          </span>
-          <div className="flex items-center gap-1.5">
-            <button
-              type="button"
-              onClick={() => setTemporaryOption(null)}
-              className={`text-[9px] px-2 py-0.5 rounded-md border transition-all cursor-pointer ${
-                temporaryOption === null
-                  ? "bg-indigo-500/20 text-indigo-400 border-indigo-500/40"
-                  : "bg-slate-800 text-slate-400 border-white/5"
-              }`}
-            >
-              Default
-            </button>
-            <button
-              type="button"
-              onClick={() => setTemporaryOption(300)}
-              className={`text-[9px] px-2 py-0.5 rounded-md border transition-all cursor-pointer ${
-                temporaryOption === 300
-                  ? "bg-indigo-500/20 text-indigo-400 border-indigo-500/40"
-                  : "bg-slate-800 text-slate-400 border-white/5"
-              }`}
-            >
-              5 Min
-            </button>
-          </div>
-        </div>
-
-        {/* PIN Input Form */}
-        <form onSubmit={handlePinSubmit} className="w-full space-y-2">
-          <input
-            type="password"
-            maxLength={8}
-            placeholder="••••"
-            value={pin}
-            onChange={(e) => {
-              setPin(e.target.value);
-              setError(null);
-            }}
-            className={`w-full text-center text-lg tracking-[0.4em] py-1.5 rounded-xl border bg-slate-800/80 text-white focus:outline-none transition-colors ${
-              error ? "border-red-500" : "border-white/10 focus:border-indigo-500"
-            }`}
-            autoFocus
-          />
-
-          {error && (
-            <p className="text-[10px] text-red-400 font-medium text-center">
-              {error}
-            </p>
-          )}
-
-          <div className="flex gap-2 pt-0.5">
-            <button
-              type="button"
-              onClick={handleCancel}
-              className="flex-1 py-1.5 rounded-xl text-xs font-semibold border border-white/10 text-slate-300 hover:bg-white/5 transition-colors cursor-pointer"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              className="flex-1 py-1.5 rounded-xl text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-white border border-white/10 transition-colors cursor-pointer"
-            >
-              Unlock
-            </button>
+    <div className="h-screen w-screen overflow-y-auto p-2 bg-transparent text-white">
+      <section aria-label="Application authentication" className="relative mx-auto max-w-[340px] rounded-2xl border border-white/10 bg-slate-900 p-4 shadow-xl">
+        <button onClick={cancel} disabled={busy} aria-label="Cancel authentication" className="absolute right-1 top-1 p-3 disabled:opacity-50"><X className="h-4 w-4" /></button>
+        <ShieldAlert aria-hidden="true" className="mx-auto mb-2 h-8 w-8 text-indigo-400" />
+        <h1 className="text-center text-sm font-bold truncate">{target?.name || "Protected application"}</h1>
+        <p className="text-center text-xs text-slate-300 mb-3">Authenticate to restore this window</p>
+        {bioAvailable && <button disabled={busy || !target} onClick={() => authenticate(true)} className="w-full mb-3 p-2 rounded-lg bg-indigo-600 flex items-center justify-center gap-2 disabled:opacity-50"><Fingerprint className="h-4 w-4" />Use system authentication</button>}
+        <form onSubmit={submit} className="space-y-2">
+          <label className="block text-xs" htmlFor="app-pin">Master PIN</label>
+          <input id="app-pin" type="password" autoComplete="current-password" autoFocus disabled={busy} value={pin} onChange={(event) => setPin(event.target.value)} className="w-full p-2 rounded-lg bg-slate-800 border border-slate-600 text-center" />
+          <label className="flex justify-between items-center text-xs">Unlock duration
+            <select aria-label="Unlock duration" disabled={busy} value={duration ?? "default"} onChange={(event) => setDuration(event.target.value === "default" ? null : 300)} className="bg-slate-800 p-1 rounded">
+              <option value="default">Default</option><option value="300">5 minutes</option>
+            </select>
+          </label>
+          {error && <p role="alert" className="text-xs text-red-300 break-words">{error}</p>}
+          <div className="flex gap-2 pt-1">
+            <button type="button" disabled={busy} onClick={cancel} className="flex-1 rounded-lg border border-slate-600 p-2 disabled:opacity-50">Cancel</button>
+            <button disabled={busy || !pin || !target} type="submit" className="flex-1 rounded-lg bg-indigo-600 p-2 disabled:opacity-50">{busy ? "Verifying…" : "Unlock"}</button>
           </div>
         </form>
-      </div>
+      </section>
     </div>
   );
 }

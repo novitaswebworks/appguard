@@ -8,7 +8,7 @@ import {
   Check,
   Copy,
 } from "lucide-react";
-import { UpdateInfo, detectUserPlatform } from "./useUpdater";
+import { UpdateInfo } from "./useUpdater";
 import { ThemeConfig } from "./theme";
 
 interface UpdateModalProps {
@@ -16,6 +16,8 @@ interface UpdateModalProps {
   onDismiss: () => void;
   onDownloadUrl: (url: string) => void;
   theme: ThemeConfig;
+  platform: string;
+  arch: string;
 }
 
 export function UpdateModal({
@@ -23,22 +25,30 @@ export function UpdateModal({
   onDismiss,
   onDownloadUrl,
   theme,
+  platform,
+  arch,
 }: UpdateModalProps) {
-  const platform = detectUserPlatform();
   const [copiedCmd, setCopiedCmd] = useState(false);
 
-  // Determine primary installer asset based on OS
+  // Native Rust platform/architecture, never a browser user-agent guess.
+  const matchesArch = (name: string) => {
+    const normalized = name.toLowerCase();
+    if (platform === "macos" && normalized.includes("universal")) return true;
+    if (arch === "aarch64") return /(?:^|[_-])(aarch64|arm64)(?:[_\-.]|$)/.test(normalized);
+    if (arch === "x86_64") return /(?:^|[_-])(x86_64|amd64|x64)(?:[_\-.]|$)/.test(normalized);
+    return false;
+  };
   const macAsset = info.assets.find(
-    (a) => a.name.endsWith(".dmg") || a.name.includes("universal.dmg")
+    (a) => a.name.endsWith(".dmg") && matchesArch(a.name)
   );
   const winAsset = info.assets.find(
-    (a) => a.name.endsWith(".msi") || a.name.endsWith("-setup.exe")
+    (a) => (a.name.endsWith(".msi") || a.name.endsWith("-setup.exe")) && matchesArch(a.name)
   );
   const linuxAsset = info.assets.find(
-    (a) => a.name.endsWith(".deb") || a.name.endsWith(".AppImage")
+    (a) => a.name.endsWith(".AppImage") && matchesArch(a.name)
   );
 
-  let primaryAsset = macAsset;
+  let primaryAsset = platform === "macos" ? macAsset : undefined;
   let cliCommand = "brew upgrade --cask novitaswebworks/tap/appguard";
   let cliLabel = "Homebrew Terminal Upgrade";
 
@@ -48,8 +58,8 @@ export function UpdateModal({
     cliLabel = "Windows Terminal Upgrade";
   } else if (platform === "linux") {
     primaryAsset = linuxAsset;
-    cliCommand = "sudo apt update && sudo apt install --only-upgrade appguard";
-    cliLabel = "Linux Package Upgrade";
+    cliCommand = "Download the matching .deb or AppImage for your distribution from GitHub Releases";
+    cliLabel = "Linux Installation";
   }
 
   const downloadTarget = primaryAsset?.browser_download_url || info.releaseUrl;
@@ -96,6 +106,7 @@ export function UpdateModal({
           </div>
           <button
             onClick={onDismiss}
+            aria-label="Dismiss update notification"
             className="p-1.5 rounded-lg opacity-60 hover:opacity-100 transition-opacity cursor-pointer"
             style={{ backgroundColor: theme.colors.bgInput }}
           >
@@ -134,6 +145,7 @@ export function UpdateModal({
             </span>
             <button
               onClick={handleCopy}
+              hidden={platform === "linux"}
               className="flex items-center gap-1 text-[11px] px-2 py-0.5 rounded cursor-pointer transition-all border"
               style={{
                 borderColor: theme.colors.borderCard,

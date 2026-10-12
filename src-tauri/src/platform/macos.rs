@@ -122,7 +122,8 @@ impl PlatformOps for MacPlatformOps {
                 reply: &*reply_block
             ];
 
-            rx.recv().unwrap_or(Err("Authentication channel dropped".into()))
+            rx.recv()
+                .unwrap_or(Err("Authentication channel dropped".into()))
         }
     }
 
@@ -203,9 +204,23 @@ impl PlatformOps for MacPlatformOps {
         None
     }
 
-    fn store_keychain_secret(&self, service: &str, account: &str, secret: &str) -> Result<(), String> {
+    fn store_keychain_secret(
+        &self,
+        service: &str,
+        account: &str,
+        secret: &str,
+    ) -> Result<(), String> {
         let res = Command::new("security")
-            .args(["add-generic-password", "-a", account, "-s", service, "-w", secret, "-U"])
+            .args([
+                "add-generic-password",
+                "-a",
+                account,
+                "-s",
+                service,
+                "-w",
+                secret,
+                "-U",
+            ])
             .output()
             .map_err(|e| e.to_string())?;
         if res.status.success() {
@@ -216,8 +231,14 @@ impl PlatformOps for MacPlatformOps {
     }
 
     fn shield_folder(&self, folder_path: &str) -> Result<(), String> {
-        let _ = Command::new("chflags").arg("hidden").arg(folder_path).status();
-        let status = Command::new("chmod").arg("000").arg(folder_path).status()
+        let _ = Command::new("chflags")
+            .arg("hidden")
+            .arg(folder_path)
+            .status();
+        let status = Command::new("chmod")
+            .arg("000")
+            .arg(folder_path)
+            .status()
             .map_err(|e| e.to_string())?;
         if status.success() {
             Ok(())
@@ -228,15 +249,21 @@ impl PlatformOps for MacPlatformOps {
 
     fn unshield_folder(&self, folder_path: &str) -> Result<(), String> {
         let _ = Command::new("chmod").arg("755").arg(folder_path).status();
-        let _ = Command::new("chflags").arg("nohidden").arg(folder_path).status();
+        let _ = Command::new("chflags")
+            .arg("nohidden")
+            .arg(folder_path)
+            .status();
         Ok(())
     }
 
     fn enable_tamper_protection(&self, app_path: &str) -> Result<(), String> {
         // Registers a launchd User Agent (~/Library/LaunchAgents/com.appguard.watchdog.plist) with KeepAlive = true
         let home = std::env::var("HOME").map_err(|e| e.to_string())?;
-        let launch_agents_dir = std::path::PathBuf::from(home).join("Library").join("LaunchAgents");
-        let _ = std::fs::create_dir_all(&launch_agents_dir);
+        let launch_agents_dir = std::path::PathBuf::from(home)
+            .join("Library")
+            .join("LaunchAgents");
+        crate::storage::reject_symlinks(&launch_agents_dir)?;
+        std::fs::create_dir_all(&launch_agents_dir).map_err(|e| e.to_string())?;
         let plist_path = launch_agents_dir.join("com.appguard.watchdog.plist");
 
         // Binary inside app bundle or standalone executable
@@ -244,40 +271,16 @@ impl PlatformOps for MacPlatformOps {
             format!("{app_path}/Contents/MacOS/appguard")
         } else if app_path.contains("/Contents/MacOS/") {
             app_path.to_string()
-        } else if std::path::Path::new("/Applications/AppGuard.app/Contents/MacOS/appguard").exists() {
+        } else if std::path::Path::new("/Applications/AppGuard.app/Contents/MacOS/appguard")
+            .exists()
+        {
             "/Applications/AppGuard.app/Contents/MacOS/appguard".to_string()
         } else {
             app_path.to_string()
         };
 
-        let plist_content = format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.appguard.watchdog</string>
-    <key>AssociatedBundleIdentifiers</key>
-    <array>
-        <string>com.appguard.desktop</string>
-    </array>
-    <key>ProgramArguments</key>
-    <array>
-        <string>{}</string>
-        <string>--minimized</string>
-    </array>
-    <key>KeepAlive</key>
-    <true/>
-    <key>RunAtLoad</key>
-    <false/>
-    <key>ProcessType</key>
-    <string>Interactive</string>
-</dict>
-</plist>"#,
-            exec_path
-        );
-
-        std::fs::write(&plist_path, plist_content).map_err(|e| e.to_string())?;
+        let plist_content = super::service_config::launch_agent(&exec_path)?;
+        crate::storage::atomic_write(&plist_path, &plist_content)?;
 
         // Unload first if previously loaded, then load
         let _ = Command::new("launchctl")

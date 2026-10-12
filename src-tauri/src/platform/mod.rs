@@ -2,6 +2,7 @@
 pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
+mod service_config;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
@@ -51,7 +52,12 @@ pub trait PlatformOps: Send + Sync {
     fn get_keychain_secret(&self, service: &str, account: &str) -> Option<String>;
 
     /// Stores a secret into the OS credential store (Keychain / Credential Manager / Secret Service)
-    fn store_keychain_secret(&self, service: &str, account: &str, secret: &str) -> Result<(), String>;
+    fn store_keychain_secret(
+        &self,
+        service: &str,
+        account: &str,
+        secret: &str,
+    ) -> Result<(), String>;
 
     /// Applies OS-level folder shield (hidden attribute, access permissions)
     fn shield_folder(&self, folder_path: &str) -> Result<(), String>;

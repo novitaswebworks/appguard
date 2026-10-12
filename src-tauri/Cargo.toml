@@ -1,6 +1,6 @@
 [package]
 name = "appguard"
-version = "0.7.0"
+version = "0.8.0-beta.1"
 description = "Biometric Lock & Privacy Vault for Apps and Folders"
 authors = ["AppGuard Authors"]
 edition = "2024"
@@ -25,6 +25,9 @@ tokio = { version = "1", features = ["full"] }
 aes-gcm = "0.11.1"
 base64 = "0.23.1"
 image = "0.25"
+plist = "1.10"
+tempfile = "3"
+zeroize = "1"
 tauri-plugin-dialog = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-global-shortcut = "2"
@@ -45,3 +48,8 @@ lto = true
 opt-level = 3
 panic = "abort"
 strip = true
+
+# Procedural macros are loaded by rustc as dynamic libraries. Keep their
+# symbols intact; stripping them can produce invalid Mach-O LINKEDIT tables.
+[profile.release.build-override]
+strip = false

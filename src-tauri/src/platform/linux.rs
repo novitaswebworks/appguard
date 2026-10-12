@@ -1,7 +1,8 @@
 use super::{FrontmostAppInfo, PlatformBiometricStatus, PlatformOps};
 use std::process::Command;
 
-/// Linux implementation supporting PAM (password/fprintd), X11/Wayland windowing, and Secret Service
+/// Linux integration with PIN-only authentication, X11 tooling, and Secret Service.
+/// Native Wayland window control requires compositor-specific integrations.
 pub struct LinuxPlatformOps;
 
 impl LinuxPlatformOps {
@@ -12,39 +13,27 @@ impl LinuxPlatformOps {
 
 impl PlatformOps for LinuxPlatformOps {
     fn check_biometrics(&self) -> PlatformBiometricStatus {
-        // Check for libfprint / fprintd biometric daemon or PAM presence
-        let has_fprintd = Command::new("which")
-            .arg("fprintd-verify")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-
         PlatformBiometricStatus {
-            is_available: true,
-            biometric_type: if has_fprintd { "PAM/Fingerprint".into() } else { "SystemPassword".into() },
-            has_system_passcode: true,
-            error_message: None,
+            is_available: false,
+            biometric_type: "MasterPIN".into(),
+            has_system_passcode: false,
+            error_message: Some(
+                "Native Linux PAM/fingerprint authentication is not enabled in this build".into(),
+            ),
         }
     }
 
-    fn authenticate_biometrics(&self, reason: &str) -> Result<bool, String> {
-        // Authenticate via pkexec / sudo / PAM helper or fprintd:
-        // Try polkit / pkexec verification
-        let status = Command::new("pkexec")
-            .args(["echo", reason])
-            .status();
-
-        match status {
-            Ok(s) if s.success() => Ok(true),
-            _ => Err("PAM authentication failed or cancelled".into()),
-        }
+    fn authenticate_biometrics(&self, _reason: &str) -> Result<bool, String> {
+        Err("Native Linux biometric authentication is not enabled in this build".into())
     }
 
     fn get_frontmost_app(&self) -> Option<FrontmostAppInfo> {
-        // X11 detection via xdotool or xprop:
-        // xdotool getactivewindow getwindowpid
-        // Wayland detection via org.gnome.Shell or KWin D-Bus interface
-        if let Ok(output) = Command::new("xdotool").args(["getwindowfocus", "getwindowname"]).output() {
+        // X11 detection via xdotool. Native Wayland does not provide a
+        // compositor-independent equivalent for arbitrary application windows.
+        if let Ok(output) = Command::new("xdotool")
+            .args(["getwindowfocus", "getwindowname"])
+            .output()
+        {
             if output.status.success() {
                 let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if !name.is_empty() {
@@ -89,11 +78,23 @@ impl PlatformOps for LinuxPlatformOps {
         None
     }
 
-    fn store_keychain_secret(&self, service: &str, account: &str, secret: &str) -> Result<(), String> {
+    fn store_keychain_secret(
+        &self,
+        service: &str,
+        account: &str,
+        secret: &str,
+    ) -> Result<(), String> {
         // secret-tool store --label="AppGuard Secret" service <service> account <account>
         use std::io::Write;
         let mut child = Command::new("secret-tool")
-            .args(["store", "--label=AppGuard Secret", "service", service, "account", account])
+            .args([
+                "store",
+                "--label=AppGuard Secret",
+                "service",
+                service,
+                "account",
+                account,
+            ])
             .stdin(std::process::Stdio::piped())
             .spawn()
             .map_err(|e| e.to_string())?;
@@ -124,10 +125,7 @@ impl PlatformOps for LinuxPlatformOps {
     }
 
     fn unshield_folder(&self, folder_path: &str) -> Result<(), String> {
-        let _ = Command::new("chmod")
-            .arg("755")
-            .arg(folder_path)
-            .status();
+        let _ = Command::new("chmod").arg("755").arg(folder_path).status();
         Ok(())
     }
 
@@ -138,12 +136,13 @@ impl PlatformOps for LinuxPlatformOps {
             .join(".config")
             .join("systemd")
             .join("user");
-        let _ = std::fs::create_dir_all(&user_service_dir);
+        crate::storage::reject_symlinks(&user_service_dir)?;
+        std::fs::create_dir_all(&user_service_dir).map_err(|e| e.to_string())?;
         let service_path = user_service_dir.join("appguard.service");
 
         let service_content = format!(
             r#"[Unit]
-Description=AppGuard Tamper-Proof Watchdog Supervisor
+Description=AppGuard Window Shield Restart Service
 After=graphical-session.target
 
 [Service]
@@ -156,15 +155,19 @@ KillMode=process
 [Install]
 WantedBy=default.target
 "#,
-            app_path
+            super::service_config::systemd_executable(app_path)?
         );
 
-        std::fs::write(&service_path, service_content).map_err(|e| e.to_string())?;
+        crate::storage::atomic_write(&service_path, service_content.as_bytes())?;
 
         // Reload systemd user daemon and enable + start the service
-        let _ = Command::new("systemctl")
+        let reload = Command::new("systemctl")
             .args(["--user", "daemon-reload"])
-            .status();
+            .status()
+            .map_err(|e| e.to_string())?;
+        if !reload.success() {
+            return Err("systemd user daemon reload failed".into());
+        }
 
         let status = Command::new("systemctl")
             .args(["--user", "enable", "--now", "appguard.service"])

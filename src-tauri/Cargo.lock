@@ -102,7 +102,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "appguard"
-version = "0.7.0"
+version = "0.8.0-beta.1"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -112,6 +112,7 @@ dependencies = [
  "objc2",
  "objc2-foundation",
  "parking_lot",
+ "plist",
  "rand 0.10.3",
  "serde",
  "serde_json",
@@ -123,7 +124,9 @@ dependencies = [
  "tauri-plugin-global-shortcut",
  "tauri-plugin-opener",
  "tauri-plugin-single-instance",
+ "tempfile",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]
@@ -6120,6 +6123,12 @@ dependencies = [
  "syn 3.0.7",
  "synstructure",
 ]
+
+[[package]]
+name = "zeroize"
+version = "1.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
 
 [[package]]
 name = "zerotrie"

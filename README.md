@@ -1,14 +1,14 @@
 # AppGuard
 
-> **Cross-Platform Biometric App Lock & Hardware-Accelerated Privacy Vault for macOS, Windows & Linux.**
+> **Desktop window shielding and an encrypted file vault, built with Tauri, React, and Rust.**
 
-[![Version](https://img.shields.io/badge/version-0.6.0-emerald.svg)](https://github.com/novitaswebworks/appguard/releases)
+[![Version](https://img.shields.io/badge/version-0.8.0--beta.1-emerald.svg)](https://github.com/novitaswebworks/appguard/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey.svg)](#platform-support)
 [![Architecture](https://img.shields.io/badge/arch-Rust%202024%20%2B%20Tauri%202-orange.svg)](#architecture)
-[![Telemetry](https://img.shields.io/badge/telemetry-0%25%20Airgapped-brightgreen.svg)](#privacy--security-guarantees)
+[![Storage](https://img.shields.io/badge/storage-local-brightgreen.svg)](#-security-architecture)
 
-AppGuard intercepts desktop application launches, window switches, and unauthorized access attempts in **< 5ms**, prompting for biometric authentication (Apple Touch ID, Windows Hello, Linux PAM) before sensitive application windows can ever draw to the screen. It also features a hardware-accelerated **AES-256-GCM** privacy vault to cloak confidential files and folders at rest with zero cloud dependency.
+AppGuard monitors desktop application window switches and unauthorized access attempts, prompting for macOS authentication or the Master PIN before allowing a protected window to remain available. It also features an **AES-256-GCM** privacy vault to protect files at rest with zero cloud dependency.
 
 Official Website & Downloads: [appguard.novitasweb.works](https://appguard.novitasweb.works)
 
@@ -16,13 +16,13 @@ Official Website & Downloads: [appguard.novitasweb.works](https://appguard.novit
 
 ## 📸 Visual Overview
 
-### 1. Instant App Shielding & Biometric Interception
-When you launch or switch to a protected app, AppGuard instantly cloaks the target window and displays a minimal, floating authentication prompt right above it. Authenticate via **Touch ID / Windows Hello** or enter your Master PIN to unlock:
+### 1. Window Shielding & Authentication
+When you launch or switch to a protected app, AppGuard shields the target window and displays a minimal, floating authentication prompt. Authenticate with macOS authentication where supported or enter your Master PIN to unlock:
 
 <p align="center">
   <img src="docs/images/compact-auth-panel.png" alt="Compact Floating Auth Panel" width="460" />
 </p>
-<p align="center"><em>Sub-5ms floating biometric prompt — zero disruption, zero dashboard popup</em></p>
+<p align="center"><em>Floating biometric prompt — zero dashboard popup</em></p>
 
 ---
 
@@ -33,12 +33,12 @@ When you launch or switch to a protected app, AppGuard instantly cloaks the targ
     <td width="50%" align="center">
       <strong>🛡️ Application Protection Manager</strong><br /><br />
       <img src="docs/images/dashboard-apps.png" alt="App Protection Engine" width="100%" />
-      <p align="left"><em>Scan and toggle hardware biometric protection for any installed app in one click.</em></p>
+      <p align="left"><em>Discover applications and configure window shielding.</em></p>
     </td>
     <td width="50%" align="center">
       <strong>🔐 Encrypted Folder Vaults (AES-256-GCM)</strong><br /><br />
       <img src="docs/images/dashboard-vault.png" alt="Encrypted Folder Vaults" width="100%" />
-      <p align="left"><em>Cloak and encrypt confidential folders with local hardware-accelerated AES-256-GCM.</em></p>
+      <p align="left"><em>Encrypt folder contents locally with AES-256-GCM.</em></p>
     </td>
   </tr>
   <tr>
@@ -50,7 +50,7 @@ When you launch or switch to a protected app, AppGuard instantly cloaks the targ
     <td width="50%" align="center">
       <strong>⚙️ Security Policy & Preferences</strong><br /><br />
       <img src="docs/images/dashboard-settings.png" alt="Security Policies & Preferences" width="100%" />
-      <p align="left"><em>Self-defense locks, idle grace periods, tamper-proof OS watchdog, and audit trail history.</em></p>
+      <p align="left"><em>Dashboard authentication, session grace periods, OS startup services, and local activity history.</em></p>
     </td>
   </tr>
 </table>
@@ -59,30 +59,29 @@ When you launch or switch to a protected app, AppGuard instantly cloaks the targ
 
 ## ✨ Features
 
-- **⚡ Sub-5ms Window Intercept:** Native background watchdog daemon intercepts protected process activations (macOS `NSWorkspace`, Windows Foreground hooks, Linux D-Bus/X11) before window rendering occurs.
-- **👆 Multi-Biometric Hardware Integration:**
-  - **macOS:** Apple Secure Enclave Touch ID & Apple Watch verification via `LocalAuthentication`.
-  - **Windows:** Windows Hello Facial Recognition & Fingerprint sensors via `UserConsentVerifier`.
-  - **Linux:** System credentials & fingerprint readers via `PAM` and `fprintd`.
+- **⚡ Background Window Shielding:** Native watchdogs detect protected application windows (macOS `NSWorkspace`, Windows foreground APIs, Linux X11 window/process identity) and show the authentication panel when they become active.
+- **👆 Authentication:**
+  - **macOS:** Touch ID or macOS account authentication via `LocalAuthentication`, with Master PIN fallback.
+  - **Windows/Linux:** Master PIN authentication. Native Windows Hello, PAM, and fingerprint integration are not enabled in this build.
 - **🔐 Memory-Hard Argon2id KDF & Brute-Force Defense:**
-  - Master PIN storage upgraded to cryptographic **Argon2id** with dedicated per-instance salts.
+  - Master PIN and vault key wrapping use cryptographic **Argon2id** with dedicated salts.
   - Exponential rate limiting and temporary lockout cooldown timers mitigate brute-force attempts.
-- **🎟️ Single-Use Replay-Proof Auth Tickets:**
-  - Authentications yield single-use authorization tokens with a strict **15-second consumption window** (`consume_recent_auth()`), preventing replay or background bypass attacks.
+- **🎟️ Single-Use Target-Bound Auth Tickets:**
+   - Authentication yields a single-use ticket with a **15-second consumption window**, bound to the intercepted application's challenge generation. Replacing the target or locking all sessions revokes it. Application authentication does not authenticate the dashboard.
 - **🪟 Compact Floating Auth Panel:**
-  - Discreet, floating, borderless modal window (`auth`) launches directly over intercepted apps so your workflow isn't disrupted by pulling open the main dashboard.
+  - Discreet, floating, borderless modal window (`auth`) appears when a protected app window is detected, so your workflow isn't disrupted by pulling open the main dashboard.
 - **🔑 Emergency Recovery Key Safeguard:**
-  - Single-use 16-character base32 recovery key (`AG-XXXX-XXXX-XXXX`) hashed with Argon2id allows safe Master PIN reset without data loss or config corruption.
+   - A single-use recovery key (`AG-XXXX-XXXX-XXXX`) allows PIN reset for enrolled vaults. Generate it with your current PIN after encrypting vaults; generate a replacement when adding encrypted vaults. Legacy PIN-derived vaults must be decrypted with their original PIN before rotation or recovery.
 - **🛡️ AES-256-GCM Encrypted Folder Vault:**
-  - Hardware-accelerated symmetric vault utilizing 96-bit OsRng nonces. Files and folders are cloaked and encrypted at rest across all disks.
-- **📜 Local-First Tamper-Evident Audit Trail:**
+   - Chunked encryption with a random per-vault data key, credential wrapping, destination collision checks, and resumable per-file transfers. File names and directory structure remain visible.
+- **📜 Local Activity History:**
   - Persistent FIFO activity log recording up to 150 lock/unlock events, PIN alterations, and watchdog triggers directly on-device.
-- **💤 Session & Sleep Auto-Arming:**
-  - Locks protected applications the moment your laptop lid closes, display goes to sleep, screensaver triggers, or customizable idle grace timers expire.
+- **Session Re-locking:**
+   - Grace-period expiry, focus-change re-locking, and explicit temporary unlock durations. Sleep/screensaver hooks and stealth mode are not implemented; their controls are unavailable.
 - **🎨 7 Handcrafted Appearance Themes:**
   - Auto-system theme synchronization plus handcrafted presets: *Nordic Minimal*, *Editorial Warm*, *Obsidian Cyber*, *Modern Slate*, *Emerald Zen*, *Rose Quartz*, and *Sunset Amber*.
-- **🌐 100% Airgapped & Zero Telemetry:**
-  - No cloud servers, no tracking analytics, no telemetry, and no account requirements.
+- **Local Security State:**
+   - No cloud account is required for authentication or vaults. The update checker contacts the GitHub Releases API; the application is not airgapped.
 
 ---
 
@@ -90,9 +89,9 @@ When you launch or switch to a protected app, AppGuard instantly cloaks the targ
 
 | Operating System | Architecture | Supported Biometrics / Auth | Package Format |
 | :--- | :--- | :--- | :--- |
-| **macOS 12+** | Apple Silicon (`arm64`) & Intel (`x86_64`) | Touch ID, Apple Watch, Argon2id PIN | `.dmg` (Universal), Homebrew |
-| **Windows 10 / 11** | 64-bit (`x64`) | Windows Hello (Face / Fingerprint / PIN) | `.exe` (NSIS Installer) |
-| **Linux (X11 & Wayland)** | `x86_64` & `arm64` (aarch64) | Linux PAM, `fprintd`, Argon2id PIN | `.AppImage`, `.deb` |
+| **macOS 13+** | Apple Silicon (`arm64`) & Intel (`x86_64`) | Touch ID / macOS account authentication, Master PIN | `.dmg` (Universal), Homebrew |
+| **Windows 10 / 11** | 64-bit (`x64`) | Argon2id Master PIN | `.exe` (NSIS Installer) |
+| **Linux (X11)** | `x86_64` & `arm64` (aarch64) | Argon2id Master PIN | `.AppImage`, `.deb` |
 
 ---
 
@@ -106,15 +105,15 @@ brew install --cask novitaswebworks/tap/appguard
 ```
 
 #### Universal DMG
-Download the latest `AppGuard_0.6.0_universal.dmg` from the [GitHub Releases](https://github.com/novitaswebworks/appguard/releases) page or the [Landing Page](https://appguard.novitasweb.works). Mount the disk image and drag **AppGuard** into your `/Applications` directory.
+Download the latest `AppGuard_0.8.0-beta.1_universal.dmg` from the [GitHub Releases](https://github.com/novitaswebworks/appguard/releases) page. Mount the disk image and drag **AppGuard** into your `/Applications` directory.
 
-> **macOS Permissions:** AppGuard requires *Accessibility* permissions to monitor application window switching and provide sub-5ms window protection. Grant this in `System Settings → Privacy & Security → Accessibility`.
+> **macOS Permissions:** AppGuard requires *Accessibility* permissions to monitor application window switching and shield protected applications. Grant this in `System Settings → Privacy & Security → Accessibility`.
 
 ---
 
 ### Windows (10 & 11)
 
-Download `AppGuard_0.6.0_x64-setup.exe` from [Releases](https://github.com/novitaswebworks/appguard/releases). Run the installer and launch AppGuard. Windows Hello will be automatically detected if configured in Windows Settings.
+Download the beta Windows installer from [Releases](https://github.com/novitaswebworks/appguard/releases). Run the installer and launch AppGuard. Use the configured Master PIN on this build.
 
 ---
 
@@ -123,24 +122,50 @@ Download `AppGuard_0.6.0_x64-setup.exe` from [Releases](https://github.com/novit
 #### AppImage
 ```bash
 # For x86_64:
-chmod +x AppGuard_0.6.0_amd64.AppImage
-./AppGuard_0.6.0_amd64.AppImage
+chmod +x AppGuard_0.8.0-beta.1_amd64.AppImage
+./AppGuard_0.8.0-beta.1_amd64.AppImage
 
 # For ARM64 (Raspberry Pi 4/5, Asahi Linux, ARM laptops):
-chmod +x AppGuard_0.6.0_aarch64.AppImage
-./AppGuard_0.6.0_aarch64.AppImage
+chmod +x AppGuard_0.8.0-beta.1_aarch64.AppImage
+./AppGuard_0.8.0-beta.1_aarch64.AppImage
 ```
 
 #### Debian / Ubuntu (.deb)
 ```bash
 # For x86_64:
-sudo dpkg -i AppGuard_0.6.0_amd64.deb
+sudo dpkg -i AppGuard_0.8.0-beta.1_amd64.deb
 sudo apt-get install -f
 
 # For ARM64:
-sudo dpkg -i AppGuard_0.6.0_arm64.deb
+sudo dpkg -i AppGuard_0.8.0-beta.1_arm64.deb
 sudo apt-get install -f
 ```
+
+### Linux application discovery
+
+AppGuard discovers graphical applications through the Freedesktop desktop-entry
+standard rather than through a distribution-specific package manager. It follows
+`XDG_DATA_HOME` and `XDG_DATA_DIRS`, including user and system
+`applications/` directories, and also recognizes the standard Flatpak and Snap
+export directories. This works across Debian/Kali, Ubuntu, Fedora, Arch,
+openSUSE, and other distributions that provide desktop entries in principle; distro-specific desktop runtime behavior still needs native validation.
+
+Applications hidden from a desktop menu with `NoDisplay=true` can still be
+protected. Hidden entries (`Hidden=true`) are treated as disabled overrides.
+Standalone binaries, AppImages without desktop integration, and command-line
+tools can be added with **Add App**. Window shielding applies to graphical
+windows; locking a terminal window does not lock every command run inside it.
+
+Linux window enforcement currently requires an X11 session, `xdotool`, and `xprop`. Install the corresponding packages with your distribution's package manager. For example, Debian/Ubuntu/Kali:
+
+```bash
+sudo apt-get install xdotool x11-utils
+```
+
+Native Wayland does not expose a universal API for one application to inspect,
+minimize, or close every other application window. Wayland support therefore
+requires a compositor-specific integration and is not reported as universally
+supported by AppGuard.
 
 ---
 
@@ -154,8 +179,8 @@ sudo apt-get install -f
                                                       |
                                                       v
                                   +---------------------------------------+
-                                  |   High-Performance Rust Watchdog      |
-                                  |    (< 5ms Platform Native Hook)       |
+                                   |   High-Performance Rust Watchdog      |
+                                   |     (Platform-Specific Backend)       |
                                   +---------------------------------------+
                                                       |
                                        [ Is Target App Protected? ]
@@ -180,7 +205,7 @@ sudo apt-get install -f
                   |
                   v
 +------------------------------------+
-|  consume_recent_auth() Validates   |
+|  Challenge::consume() Validates    |
 |  & Target Application Uncloaked    |
 +------------------------------------+
                   |
@@ -191,10 +216,20 @@ sudo apt-get install -f
 ```
 
 ### Cryptographic Details
-- **Master PIN Hash:** Argon2id (`m_cost = 19456`, `t_cost = 2`, `p_cost = 1`) with 16-byte cryptographically secure random salt generated via `rand::rngs::OsRng`.
-- **Vault Encryption:** AES-256-GCM cipher with unique 96-bit initialization vectors (nonces) per file.
-- **Recovery Key:** 16-character Base32 emergency key with Argon2id verification for resilient, airgapped disaster recovery.
-- **Config Integrity:** Atomic file writes with `.tmp` staging and `.bak` snapshots prevent corruption during system interruptions.
+  - **Master PIN Hash:** Argon2id with a cryptographically random per-hash salt.
+  - **Vault Encryption:** AES-256-GCM with an authenticated file header, 1 MiB chunks, a random per-file nonce prefix and chunk counter, and a random per-vault data key wrapped by an Argon2id-derived key. PINs have limited entropy; use OS full-disk encryption as well.
+  - **Recovery Key:** Single-use recovery code with Argon2id verification and separate wrapping of enrolled vault keys. All vault rewraps are prepared before committing a credential change.
+  - **Persistence:** Private atomic writes, directory synchronization where supported, and a credential journal that can complete an interrupted multi-vault change on restart. The backup contains the latest committed credentials. A damaged config blocks startup instead of silently resetting protection rules.
+
+### Boundaries and recovery
+
+- Window shielding polls after focus changes; it can expose frames before detection and does not stop processes, CLI commands, screenshots, or a user with the same OS privileges. Native Wayland window control is unavailable.
+- Local config and activity history are not tamper-proof or cryptographically authenticated. Restart services can be removed by the OS user; Windows currently provides a logon task, not continuous supervision.
+- Vault transfers are per-file rather than all-or-nothing for the entire directory. Failed operations are reported as partial. Original sources are retained until a verified destination is published. Reconnect missing disks and retry recovery before changing credentials.
+- If `.appguard_transfer.tmp` exists without a journal, move it outside the vault before retrying. AppGuard will not delete an unowned scratch file. Retain it for inspection/backup because it may contain partial plaintext from an interrupted decrypt.
+- Legacy ciphertext is readable up to 128 MiB per file. Larger legacy files require offline migration; originals are retained. Old extensionless names may retain the historical trailing dot because the original name was not recorded unambiguously.
+- Symlinks and hard-linked data are rejected. Basic file modes and modification times are preserved; extended attributes, ACLs, snapshots, and secure physical deletion are outside this vault format's guarantees. Keep independent backups.
+- Updates are manual downloads from GitHub Releases. There is no integrated signed automatic-update installation protocol.
 
 ---
 
@@ -232,8 +267,13 @@ sudo apt-get install -f
    # Frontend TypeScript & Vite build
    pnpm run build
 
-   # Rust backend check
-   cd src-tauri && cargo check
+    # Browser UI contracts (mocked Tauri IPC)
+    pnpm exec playwright install chromium
+    pnpm run test:ui
+
+    # Rust backend check and regression tests
+    cargo check --manifest-path src-tauri/Cargo.toml
+    cargo test --manifest-path src-tauri/Cargo.toml
    ```
 
 5. **Build release packages:**
@@ -256,13 +296,15 @@ appguard/
 │   └── main.tsx          # Multi-window router entry point
 ├── src-tauri/            # Tauri 2 Rust backend
 │   ├── src/
-│   │   ├── auth.rs       # Platform biometric bindings (Touch ID, Hello, PAM)
+│   │   ├── auth.rs       # Platform authentication dispatch
 │   │   ├── lib.rs        # IPC command handlers & lifecycle events
-│   │   ├── platform.rs   # OS window activation & process management
+│   │   ├── platform/     # Platform-specific authentication and OS services
 │   │   ├── scanner.rs    # Installed application scanning logic
 │   │   ├── state.rs      # Argon2id KDF, recovery key, audit log & config
 │   │   ├── vault.rs      # AES-256-GCM file & folder encryption engine
-│   │   └── watchdog.rs   # Sub-5ms application intercept daemon
+│   │   ├── session.rs    # Target-bound, expiring authentication tickets
+│   │   ├── storage.rs    # Private atomic file writes and path validation
+│   │   └── watchdog.rs   # Best-effort foreground-window polling
 │   ├── Cargo.toml        # Rust dependencies & build profile
 │   └── tauri.conf.json   # Multi-window definitions, capabilities & bundle config
 └── package.json          # Frontend packages & scripts

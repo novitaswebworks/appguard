@@ -1,16 +1,79 @@
 pub mod auth;
 pub mod platform;
 pub mod scanner;
+mod session;
 pub mod state;
+mod storage;
 pub mod vault;
 pub mod watchdog;
 
 use auth::BiometricStatus;
 use scanner::ScannedApp;
-use state::{AppGuardConfig, AppRule, SecurityManager};
+use state::{AppRule, SecurityManager};
 use std::sync::Arc;
 use tauri::{Emitter, Manager, State};
 use vault::VaultItem;
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct PublicAppGuardConfig {
+    locked_apps: std::collections::HashMap<String, AppRule>,
+    locked_folders: Vec<String>,
+    grace_period_seconds: u64,
+    stealth_mode: bool,
+    app_self_locked: bool,
+    lock_on_sleep: bool,
+    lock_on_screensaver: bool,
+    instant_lock_mode: bool,
+    tamper_protection_enabled: bool,
+    activity_log: Vec<state::AuditEvent>,
+    pin_configured: bool,
+    recovery_key_configured: bool,
+}
+
+fn main_window(window: &tauri::WebviewWindow) -> Result<(), String> {
+    if window.label() == "main" {
+        Ok(())
+    } else {
+        Err("This command is restricted to the dashboard".into())
+    }
+}
+fn dashboard(window: &tauri::WebviewWindow, security: &SecurityManager) -> Result<(), String> {
+    main_window(window)?;
+    security.require_authenticated()
+}
+fn auth_window(window: &tauri::WebviewWindow) -> Result<(), String> {
+    if window.label() == "auth" {
+        Ok(())
+    } else {
+        Err("Use the application authentication window".into())
+    }
+}
+
+#[tauri::command]
+fn quit_app(
+    app_handle: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    security: State<'_, Arc<SecurityManager>>,
+) -> Result<(), String> {
+    main_window(&window)?;
+    let _operation = security.operation_lock.lock();
+    security.ensure_ready()?;
+    if security.is_pin_configured() {
+        security.require_authenticated()?;
+    }
+    if security.config.read().tamper_protection_enabled {
+        platform::get_platform().disable_tamper_protection()?;
+        security.config.write().tamper_protection_enabled = false;
+        security.save()?;
+    }
+    app_handle.exit(0);
+    Ok(())
+}
+
+#[tauri::command]
+fn security_status(security: State<'_, Arc<SecurityManager>>) -> serde_json::Value {
+    serde_json::json!({"error": security.ensure_ready().err(), "authenticated": security.is_app_authenticated(), "pin_configured": security.is_pin_configured(), "platform": std::env::consts::OS, "arch": std::env::consts::ARCH, "protection": watchdog::capability()})
+}
 
 // ----------------- IPC Tauri Commands -----------------
 
@@ -22,11 +85,15 @@ fn check_biometrics() -> BiometricStatus {
 #[tauri::command]
 fn authenticate_biometrics(
     reason: String,
+    window: tauri::WebviewWindow,
     security: State<'_, Arc<SecurityManager>>,
 ) -> Result<bool, String> {
+    main_window(&window)?;
+    security.ensure_ready()?;
+    let generation = security.auth_generation();
     let success = auth::authenticate(&reason)?;
     if success {
-        security.set_app_authenticated(true);
+        security.authenticate_dashboard(generation)?;
     }
     Ok(success)
 }
@@ -37,22 +104,47 @@ fn is_pin_configured(security: State<'_, Arc<SecurityManager>>) -> bool {
 }
 
 #[tauri::command]
-fn set_master_pin(pin: String, security: State<'_, Arc<SecurityManager>>) -> Result<bool, String> {
-    security.set_master_pin(&pin).map(|_| true)
+fn set_master_pin(
+    pin: String,
+    window: tauri::WebviewWindow,
+    security: State<'_, Arc<SecurityManager>>,
+) -> Result<bool, String> {
+    main_window(&window)?;
+    let _operation = security.operation_lock.lock();
+    security.ensure_ready()?;
+    if security.is_pin_configured() {
+        return Err("A Master PIN already exists; use the authenticated PIN change flow".into());
+    }
+    security.set_master_pin(&pin)?;
+    security.set_app_authenticated(true);
+    Ok(true)
 }
 
 #[tauri::command]
-fn verify_pin(pin: String, security: State<'_, Arc<SecurityManager>>) -> Result<bool, String> {
+fn verify_pin(
+    pin: String,
+    window: tauri::WebviewWindow,
+    security: State<'_, Arc<SecurityManager>>,
+) -> Result<bool, String> {
+    main_window(&window)?;
+    let _operation = security.operation_lock.lock();
+    let generation = security.auth_generation();
     let valid = security.verify_master_pin(&pin)?;
     if valid {
-        security.set_app_authenticated(true);
+        security.authenticate_dashboard(generation)?;
     }
     Ok(valid)
 }
 
 #[tauri::command]
-fn generate_recovery_key(security: State<'_, Arc<SecurityManager>>) -> Result<String, String> {
-    security.generate_recovery_key()
+fn generate_recovery_key(
+    pin: String,
+    window: tauri::WebviewWindow,
+    security: State<'_, Arc<SecurityManager>>,
+) -> Result<String, String> {
+    let _operation = security.operation_lock.lock();
+    dashboard(&window, &security)?;
+    security.generate_recovery_key(&pin)
 }
 
 #[tauri::command]
@@ -64,23 +156,49 @@ fn is_recovery_configured(security: State<'_, Arc<SecurityManager>>) -> bool {
 fn verify_recovery_key(
     key: String,
     new_pin: String,
+    window: tauri::WebviewWindow,
     security: State<'_, Arc<SecurityManager>>,
 ) -> Result<bool, String> {
+    main_window(&window)?;
+    let _operation = security.operation_lock.lock();
     security.verify_recovery_key(&key, &new_pin)
 }
 
 #[tauri::command]
-fn get_activity_log(security: State<'_, Arc<SecurityManager>>) -> Vec<state::AuditEvent> {
-    security.get_activity_log()
+fn get_activity_log(
+    window: tauri::WebviewWindow,
+    security: State<'_, Arc<SecurityManager>>,
+) -> Result<Vec<state::AuditEvent>, String> {
+    dashboard(&window, &security)?;
+    Ok(security.get_activity_log())
 }
 
 #[tauri::command]
-fn get_locked_app_target(
+fn get_locked_app_target(security: State<'_, Arc<SecurityManager>>) -> Option<session::Target> {
+    security.challenge.lock().get()
+}
+
+#[tauri::command]
+fn authenticate_target(
+    bundle_id: String,
+    request_id: u64,
+    pin: Option<String>,
+    window: tauri::WebviewWindow,
     security: State<'_, Arc<SecurityManager>>,
-) -> Option<serde_json::Value> {
-    security
-        .get_pending_locked_target()
-        .map(|(bundle_id, name)| serde_json::json!({ "bundle_id": bundle_id, "name": name }))
+) -> Result<bool, String> {
+    auth_window(&window)?;
+    security.ensure_ready()?;
+    let target = security.challenge.lock().validate(&bundle_id, request_id)?;
+    let valid = if let Some(pin) = pin {
+        let _operation = security.operation_lock.lock();
+        security.verify_master_pin(&pin)?
+    } else {
+        auth::authenticate(&format!("Unlock {}", target.name))?
+    };
+    if valid {
+        security.challenge.lock().authorize(&target)?;
+    }
+    Ok(valid)
 }
 
 #[tauri::command]
@@ -91,13 +209,17 @@ fn is_app_authenticated(security: State<'_, Arc<SecurityManager>>) -> bool {
 #[tauri::command]
 fn unlock_appguard(
     reason: Option<String>,
+    window: tauri::WebviewWindow,
     security: State<'_, Arc<SecurityManager>>,
 ) -> Result<bool, String> {
+    main_window(&window)?;
+    security.ensure_ready()?;
+    let generation = security.auth_generation();
     // Rust-enforced authentication gate: require valid OS biometric or passcode
     let auth_reason = reason.unwrap_or_else(|| "Authenticate to access AppGuard".into());
     let success = auth::authenticate(&auth_reason)?;
     if success {
-        security.set_app_authenticated(true);
+        security.authenticate_dashboard(generation)?;
         Ok(true)
     } else {
         Err("Authentication failed".into())
@@ -119,8 +241,11 @@ fn update_preferences(
     instant_lock_mode: bool,
     stealth_mode: bool,
     tamper_protection_enabled: bool,
+    window: tauri::WebviewWindow,
     security: State<'_, Arc<SecurityManager>>,
 ) -> Result<bool, String> {
+    let _operation = security.operation_lock.lock();
+    dashboard(&window, &security)?;
     security
         .update_preferences(
             grace_period_seconds,
@@ -137,8 +262,11 @@ fn update_preferences(
 #[tauri::command]
 fn set_tamper_protection(
     enabled: bool,
+    window: tauri::WebviewWindow,
     security: State<'_, Arc<SecurityManager>>,
 ) -> Result<bool, String> {
+    let _operation = security.operation_lock.lock();
+    dashboard(&window, &security)?;
     let platform = platform::get_platform();
     if enabled {
         let exe_path = std::env::current_exe()
@@ -161,41 +289,69 @@ fn set_tamper_protection(
 fn change_master_pin(
     old_pin: String,
     new_pin: String,
+    window: tauri::WebviewWindow,
     security: State<'_, Arc<SecurityManager>>,
 ) -> Result<bool, String> {
-    if !security.verify_master_pin(&old_pin)? {
-        return Err("Current PIN is incorrect".into());
-    }
-    security.set_master_pin(&new_pin).map(|_| true)
+    let _operation = security.operation_lock.lock();
+    dashboard(&window, &security)?;
+    security.change_pin(&old_pin, &new_pin).map(|_| true)
 }
 
 #[tauri::command]
-fn get_config(security: State<'_, Arc<SecurityManager>>) -> AppGuardConfig {
-    security.config.read().clone()
+fn get_config(
+    window: tauri::WebviewWindow,
+    security: State<'_, Arc<SecurityManager>>,
+) -> Result<PublicAppGuardConfig, String> {
+    dashboard(&window, &security)?;
+    let cfg = security.config.read();
+    Ok(PublicAppGuardConfig {
+        locked_apps: cfg.locked_apps.clone(),
+        locked_folders: cfg.locked_folders.clone(),
+        grace_period_seconds: cfg.grace_period_seconds,
+        stealth_mode: false,
+        app_self_locked: true,
+        lock_on_sleep: false,
+        lock_on_screensaver: false,
+        instant_lock_mode: cfg.instant_lock_mode,
+        tamper_protection_enabled: cfg.tamper_protection_enabled,
+        activity_log: cfg.activity_log.clone(),
+        pin_configured: cfg.master_pin_hash.is_some(),
+        recovery_key_configured: cfg.recovery_key_hash.is_some(),
+    })
 }
 
 #[tauri::command]
 fn toggle_lock_app(
     app: AppRule,
+    window: tauri::WebviewWindow,
     security: State<'_, Arc<SecurityManager>>,
 ) -> Result<bool, String> {
+    let _operation = security.operation_lock.lock();
+    dashboard(&window, &security)?;
+    if app.is_locked && !watchdog::capability().available {
+        return Err(watchdog::capability().message);
+    }
     security.toggle_app_lock(app).map(|_| true)
 }
 
 #[tauri::command]
 fn unlock_app_session(
     bundle_id: String,
+    request_id: u64,
     duration_secs: Option<u64>,
     app_handle: tauri::AppHandle,
+    window: tauri::WebviewWindow,
     security: State<'_, Arc<SecurityManager>>,
 ) -> Result<bool, String> {
-    // Cryptographically enforce authorization: caller must have recently authenticated via biometric or PIN
-    if !security.consume_recent_auth() {
-        return Err("Unauthorized: Session unlock requires recent user authentication (PIN or Biometric)".into());
+    auth_window(&window)?;
+    security.ensure_ready()?;
+    if duration_secs.is_some_and(|seconds| seconds == 0 || seconds > 3600) {
+        return Err("Invalid unlock duration".into());
     }
-
+    let _windows = security.window_lock.lock();
+    let target = security.challenge.lock().consume(&bundle_id, request_id)?;
+    let _pending_platform_window = target.window;
     security.mark_app_unlocked(&bundle_id, duration_secs);
-    security.clear_pending_locked_target();
 
     #[cfg(target_os = "macos")]
     {
@@ -227,6 +383,26 @@ fn unlock_app_session(
         }
     }
 
+    #[cfg(target_os = "linux")]
+    {
+        // Restore the exact window that triggered authentication. Window
+        // titles are not stable application identifiers and often do not
+        // contain the desktop-file ID.
+        if let Some(window_id) = _pending_platform_window {
+            let _ = std::process::Command::new("xdotool")
+                .args(["windowmap", &window_id])
+                .status();
+            let _ = std::process::Command::new("xdotool")
+                .args(["windowactivate", &window_id])
+                .status();
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    if let Some(window_handle) = _pending_platform_window {
+        watchdog::windows_show_window(&window_handle, true);
+    }
+
     // Release always-on-top and hide both auth and main windows so focus returns to the unlocked app
     if let Some(auth_win) = app_handle.get_webview_window("auth") {
         let _ = auth_win.set_always_on_top(false);
@@ -239,8 +415,14 @@ fn unlock_app_session(
     Ok(true)
 }
 
-pub fn enforce_lock_all(security: &SecurityManager) {
+pub fn enforce_lock_all(app: &tauri::AppHandle, security: &SecurityManager) {
+    let _operation = security.operation_lock.lock();
     security.lock_all();
+    let _windows = security.window_lock.lock();
+    let _ = app.emit("sessions-locked", ());
+    if let Some(auth) = app.get_webview_window("auth") {
+        let _ = auth.hide();
+    }
 
     #[cfg(target_os = "macos")]
     {
@@ -272,6 +454,13 @@ pub fn enforce_lock_all(security: &SecurityManager) {
             }
         }
     }
+
+    #[cfg(target_os = "linux")]
+    {
+        watchdog::enforce_linux_lock_all(app, security);
+    }
+    #[cfg(target_os = "windows")]
+    watchdog::enforce_windows_lock_all(app, security);
 }
 
 #[tauri::command]
@@ -279,19 +468,22 @@ fn lock_all_sessions(
     app_handle: tauri::AppHandle,
     security: State<'_, Arc<SecurityManager>>,
 ) -> bool {
-    security.set_app_authenticated(false);
-    enforce_lock_all(&security);
-    let _ = app_handle.emit("sessions-locked", ());
+    enforce_lock_all(&app_handle, &security);
     true
 }
 
 #[tauri::command]
 fn close_locked_application(
-    _bundle_id: String,
+    bundle_id: String,
+    request_id: u64,
     app_handle: tauri::AppHandle,
+    window: tauri::WebviewWindow,
     security: State<'_, Arc<SecurityManager>>,
 ) -> Result<bool, String> {
-    security.clear_pending_locked_target();
+    auth_window(&window)?;
+    let _windows = security.window_lock.lock();
+    let target = security.challenge.lock().cancel(&bundle_id, request_id)?;
+    let _pending_platform_window = target.window;
     if let Some(auth_win) = app_handle.get_webview_window("auth") {
         let _ = auth_win.set_always_on_top(false);
         let _ = auth_win.hide();
@@ -315,7 +507,7 @@ fn close_locked_application(
                             let app: *mut objc2::runtime::AnyObject =
                                 msg_send![running_apps, objectAtIndex: i];
                             let bid: *mut NSString = msg_send![app, bundleIdentifier];
-                            if !bid.is_null() && (*bid).to_string() == _bundle_id {
+                            if !bid.is_null() && (*bid).to_string() == bundle_id {
                                 // Force hide and terminate the unauthorized app
                                 let _: () = msg_send![app, hide];
                                 let _: bool = msg_send![app, terminate];
@@ -327,6 +519,19 @@ fn close_locked_application(
             }
         }
     }
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(window_id) = _pending_platform_window {
+            let _ = std::process::Command::new("xdotool")
+                .args(["windowclose", &window_id])
+                .status();
+        }
+    }
+    #[cfg(target_os = "windows")]
+    if let Some(window_handle) = _pending_platform_window {
+        watchdog::windows_show_window(&window_handle, false);
+    }
     Ok(true)
 }
 
@@ -335,7 +540,9 @@ fn hide_auth_window(
     app_handle: tauri::AppHandle,
     security: State<'_, Arc<SecurityManager>>,
 ) -> bool {
-    security.clear_pending_locked_target();
+    if security.challenge.lock().get().is_some() {
+        return false;
+    }
     if let Some(auth_win) = app_handle.get_webview_window("auth") {
         let _ = auth_win.set_always_on_top(false);
         let _ = auth_win.hide();
@@ -344,12 +551,70 @@ fn hide_auth_window(
 }
 
 #[tauri::command]
-fn get_installed_apps() -> Vec<ScannedApp> {
-    scanner::scan_installed_applications()
+fn get_installed_apps(
+    window: tauri::WebviewWindow,
+    security: State<'_, Arc<SecurityManager>>,
+) -> Result<Vec<ScannedApp>, String> {
+    main_window(&window)?;
+    security.ensure_ready()?;
+    if security.is_pin_configured() {
+        security.require_authenticated()?;
+    }
+    let mut apps = scanner::scan_installed_applications();
+    let known_ids: std::collections::HashSet<String> =
+        apps.iter().map(|app| app.bundle_id.clone()).collect();
+
+    // Keep manually registered binaries visible after a restart or rescan.
+    // They are not required to have a .desktop launcher.
+    for rule in security.config.read().locked_apps.values() {
+        if !known_ids.contains(&rule.bundle_id) {
+            apps.push(ScannedApp {
+                name: rule.name.clone(),
+                bundle_id: rule.bundle_id.clone(),
+                path: rule.path.clone(),
+                icon_path: None,
+                icon_base64: rule.icon_base64.clone(),
+                exec_path: rule.exec_path.clone(),
+                startup_wm_class: rule.startup_wm_class.clone(),
+            });
+        }
+    }
+
+    apps.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    Ok(apps)
 }
 
 #[tauri::command]
-fn inspect_folder_vaults(security: State<'_, Arc<SecurityManager>>) -> Vec<VaultItem> {
+fn register_application(
+    path: String,
+    window: tauri::WebviewWindow,
+    security: State<'_, Arc<SecurityManager>>,
+) -> Result<ScannedApp, String> {
+    let _operation = security.operation_lock.lock();
+    dashboard(&window, &security)?;
+    let capability = watchdog::capability();
+    if !capability.available {
+        return Err(capability.message);
+    }
+    let app = scanner::inspect_application(&path)?;
+    security.toggle_app_lock(AppRule {
+        bundle_id: app.bundle_id.clone(),
+        name: app.name.clone(),
+        path: app.path.clone(),
+        is_locked: true,
+        icon_base64: app.icon_base64.clone(),
+        exec_path: app.exec_path.clone(),
+        startup_wm_class: app.startup_wm_class.clone(),
+    })?;
+    Ok(app)
+}
+
+#[tauri::command]
+fn inspect_folder_vaults(
+    window: tauri::WebviewWindow,
+    security: State<'_, Arc<SecurityManager>>,
+) -> Result<Vec<VaultItem>, String> {
+    dashboard(&window, &security)?;
     let folders = security.config.read().locked_folders.clone();
     let mut items = Vec::new();
     for folder in folders {
@@ -357,23 +622,35 @@ fn inspect_folder_vaults(security: State<'_, Arc<SecurityManager>>) -> Vec<Vault
             items.push(item);
         }
     }
-    items
+    Ok(items)
 }
 
 #[tauri::command]
 fn add_folder_to_vault(
     folder_path: String,
+    window: tauri::WebviewWindow,
     security: State<'_, Arc<SecurityManager>>,
 ) -> Result<VaultItem, String> {
+    let _operation = security.operation_lock.lock();
+    dashboard(&window, &security)?;
     security.add_vault_folder(folder_path.clone())?;
-    vault::inspect_vault(&folder_path).ok_or_else(|| "Failed to inspect added folder".into())
+    let canonical_path = std::fs::canonicalize(&folder_path)
+        .map_err(|e| format!("Failed to resolve vault folder: {e}"))?;
+    let canonical_path = canonical_path.to_string_lossy().to_string();
+    vault::inspect_vault(&canonical_path).ok_or_else(|| "Failed to inspect added folder".into())
 }
 
 #[tauri::command]
 fn remove_folder_from_vault(
     folder_path: String,
+    window: tauri::WebviewWindow,
     security: State<'_, Arc<SecurityManager>>,
 ) -> Result<bool, String> {
+    let _operation = security.operation_lock.lock();
+    dashboard(&window, &security)?;
+    if vault::inspect_vault(&folder_path).is_some_and(|item| item.is_locked) {
+        return Err("Decrypt this vault before removing it".into());
+    }
     security.remove_vault_folder(&folder_path)?;
     Ok(true)
 }
@@ -382,26 +659,44 @@ fn remove_folder_from_vault(
 fn encrypt_vault_folder(
     folder_path: String,
     pin: String,
+    window: tauri::WebviewWindow,
     security: State<'_, Arc<SecurityManager>>,
 ) -> Result<bool, String> {
+    let _operation = security.operation_lock.lock();
+    dashboard(&window, &security)?;
+    security.require_vault(&folder_path)?;
     if !security.verify_master_pin(&pin)? {
         return Err("Invalid Master PIN".into());
     }
-    security.log_event("vault_encrypted", &format!("Folder successfully encrypted: {folder_path}"), "info");
-    vault::lock_folder(&folder_path, &pin)
+    let result = vault::lock_folder(&folder_path, &pin)?;
+    security.log_event(
+        "vault_encrypted",
+        &format!("Folder successfully encrypted: {folder_path}"),
+        "info",
+    );
+    Ok(result)
 }
 
 #[tauri::command]
 fn decrypt_vault_folder(
     folder_path: String,
     pin: String,
+    window: tauri::WebviewWindow,
     security: State<'_, Arc<SecurityManager>>,
 ) -> Result<bool, String> {
+    let _operation = security.operation_lock.lock();
+    dashboard(&window, &security)?;
+    security.require_vault(&folder_path)?;
     if !security.verify_master_pin(&pin)? {
         return Err("Invalid Master PIN".into());
     }
-    security.log_event("vault_decrypted", &format!("Folder decrypted: {folder_path}"), "info");
-    vault::unlock_folder(&folder_path, &pin)
+    let result = vault::unlock_folder(&folder_path, &pin)?;
+    security.log_event(
+        "vault_decrypted",
+        &format!("Folder decrypted: {folder_path}"),
+        "info",
+    );
+    Ok(result)
 }
 
 use tauri::menu::{Menu, MenuItem};
@@ -451,18 +746,39 @@ pub fn run() {
             use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
             if let Ok(shortcut) = "CommandOrControl+Shift+L".parse::<Shortcut>() {
                 let shortcut_security = tray_security.clone();
-                let _ = app.global_shortcut().on_shortcut(shortcut, move |_app, _sc, _ev| {
-                    shortcut_security.lock_all();
-                });
+                let _ = app
+                    .global_shortcut()
+                    .on_shortcut(shortcut, move |app, _sc, event| {
+                        if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                            enforce_lock_all(app, &shortcut_security);
+                        }
+                    });
             }
 
             // Build enhanced system tray menu
-            let count = tray_security.config.read().locked_apps.values().filter(|a| a.is_locked).count();
-            let shield_text = format!("🛡️ Shield Active ({count} apps locked)");
+            let count = tray_security
+                .config
+                .read()
+                .locked_apps
+                .values()
+                .filter(|a| a.is_locked)
+                .count();
+            let shield_text = if watchdog::capability().available {
+                format!("Window shield ({count} rules)")
+            } else {
+                "Window shielding unavailable".into()
+            };
             let status_i = MenuItem::with_id(app, "status", shield_text, false, None::<&str>)?;
             let show_i = MenuItem::with_id(app, "show", "Open AppGuard", true, None::<&str>)?;
-            let lock_i = MenuItem::with_id(app, "lock_all", "🔒 Lock All Now (⌘⇧L)", true, None::<&str>)?;
-            let prefs_i = MenuItem::with_id(app, "prefs", "⚙️ Preferences & Palettes", true, None::<&str>)?;
+            let lock_i =
+                MenuItem::with_id(app, "lock_all", "🔒 Lock All Now (⌘⇧L)", true, None::<&str>)?;
+            let prefs_i = MenuItem::with_id(
+                app,
+                "prefs",
+                "⚙️ Preferences & Palettes",
+                true,
+                None::<&str>,
+            )?;
             let quit_i = MenuItem::with_id(app, "quit", "❌ Quit AppGuard", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&status_i, &show_i, &lock_i, &prefs_i, &quit_i])?;
 
@@ -491,17 +807,17 @@ pub fn run() {
                             }
                         }
                         "lock_all" => {
-                            enforce_lock_all(&tray_security);
+                            enforce_lock_all(&tray_handle, &tray_security);
                         }
                         "quit" => {
-                            // Security Gate: Ensure unauthorized individuals cannot terminate AppGuard
-                            std::thread::spawn(|| {
-                                if let Ok(success) = auth::authenticate("Authenticate to Quit AppGuard") {
-                                    if success {
-                                        std::process::exit(0);
-                                    }
-                                }
-                            });
+                            // Use the authenticated dashboard, including its
+                            // PIN flow on platforms without OS authentication.
+                            if let Some(w) = tray_handle.get_webview_window("main") {
+                                let _ = w.show();
+                                let _ = w.unminimize();
+                                let _ = w.set_focus();
+                                let _ = w.emit("quit-requested", ());
+                            }
                         }
                         _ => {}
                     }
@@ -513,6 +829,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            security_status,
+            quit_app,
+            authenticate_target,
             check_biometrics,
             authenticate_biometrics,
             is_pin_configured,
@@ -529,6 +848,7 @@ pub fn run() {
             unlock_app_session,
             lock_all_sessions,
             get_installed_apps,
+            register_application,
             close_locked_application,
             inspect_folder_vaults,
             add_folder_to_vault,
@@ -546,6 +866,16 @@ pub fn run() {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 // Prevent application exit on window close, minimize to tray
                 api.prevent_close();
+                let security = window.state::<Arc<SecurityManager>>();
+                if window.label() == "auth" && security.challenge.lock().get().is_some() {
+                    // Cancel through the target-bound IPC so a window close
+                    // cannot silently leave an invisible live challenge.
+                    return;
+                }
+                if window.label() == "main" {
+                    security.set_app_authenticated(false);
+                    let _ = window.emit("sessions-locked", ());
+                }
                 let _ = window.hide();
             }
         })

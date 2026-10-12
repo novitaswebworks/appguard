@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -29,6 +29,7 @@ import {
   Sparkles,
   History,
   AlertTriangle,
+  Plus,
 } from "lucide-react";
 import { THEMES, ThemeMode, ConcreteThemeMode } from "./theme";
 import { useUpdater } from "./useUpdater";
@@ -47,6 +48,18 @@ interface VaultItem {
   is_locked: boolean;
   file_count: number;
   total_size_bytes: number;
+  status: string;
+  recovery_enabled: boolean;
+  error: string | null;
+}
+
+interface SecurityStatus {
+  error: string | null;
+  authenticated: boolean;
+  pin_configured: boolean;
+  platform: string;
+  arch: string;
+  protection: { available: boolean; message: string };
 }
 
 interface ScannedApp {
@@ -55,6 +68,8 @@ interface ScannedApp {
   path: string;
   icon_path?: string;
   icon_base64?: string;
+  exec_path?: string;
+  startup_wm_class?: string;
 }
 
 interface AppRule {
@@ -63,6 +78,8 @@ interface AppRule {
   path: string;
   is_locked: boolean;
   icon_base64?: string;
+  exec_path?: string;
+  startup_wm_class?: string;
 }
 
 interface AuditEvent {
@@ -73,8 +90,6 @@ interface AuditEvent {
 }
 
 interface AppGuardConfig {
-  master_pin_hash?: string;
-  recovery_key_hash?: string;
   locked_apps: Record<string, AppRule>;
   locked_folders: string[];
   grace_period_seconds: number;
@@ -85,6 +100,8 @@ interface AppGuardConfig {
   instant_lock_mode: boolean;
   tamper_protection_enabled?: boolean;
   activity_log?: AuditEvent[];
+  pin_configured?: boolean;
+  recovery_key_configured?: boolean;
 }
 
 export default function App() {
@@ -147,7 +164,18 @@ export default function App() {
   } | null>(null);
 
   // AppGuard Self-Lock Gate (Protects AppGuard itself from unauthorized access)
-  const [isAppLocked, setIsAppLocked] = useState(false);
+  const [isAppLocked, setIsAppLocked] = useState(true);
+  const [initialized, setInitialized] = useState(false);
+  const [startupError, setStartupError] = useState<string | null>(null);
+  const [securityStatus, setSecurityStatus] = useState<SecurityStatus | null>(null);
+  const [operationError, setOperationError] = useState<string | null>(null);
+  const [quitRequested, setQuitRequested] = useState(false);
+  const [recoveryPin, setRecoveryPin] = useState<string | null>(null);
+  const [recoveryGenerateError, setRecoveryGenerateError] = useState<string | null>(null);
+  const [working, setWorking] = useState(false);
+  const sessionEpoch = useRef(0);
+  const authenticating = useRef(false);
+  const [authBusy, setAuthBusy] = useState(false);
   const [selfLockPinInput, setSelfLockPinInput] = useState("");
   const [selfLockPinError, setSelfLockPinError] = useState<string | null>(null);
   const [selfLockAuthSuccess, setSelfLockAuthSuccess] = useState(false);
@@ -160,7 +188,7 @@ export default function App() {
   const [wizardConfirmPin, setWizardConfirmPin] = useState("");
   const [wizardError, setWizardError] = useState("");
   const [wizardSelectedBundles, setWizardSelectedBundles] = useState<Set<string>>(
-    new Set(["com.apple.Notes", "com.apple.MobileSMS", "com.apple.Photos", "com.apple.Terminal"])
+    new Set()
   );
 
   // Settings tab state
@@ -188,47 +216,61 @@ export default function App() {
   }, [currentTheme, theme]);
 
   useEffect(() => {
-    initApp();
-
+    let disposed = false;
     const unlistenLocked = listen("sessions-locked", () => {
-      setIsAppLocked(true);
+      revokeDashboard();
       setLockAllSuccess(true);
       setTimeout(() => setLockAllSuccess(false), 2000);
     });
+    const unlistenQuit = listen("quit-requested", () => setQuitRequested(true));
+    void unlistenLocked.then(() => { if (!disposed) void initApp(); });
+
+    const refreshStatus = async () => {
+      try {
+        const status = await invoke<SecurityStatus>("security_status");
+        if (disposed) return;
+        setSecurityStatus(status);
+        if (status.error) setStartupError(status.error);
+        if (status.pin_configured && !status.authenticated && !authenticating.current) revokeDashboard();
+      } catch (error) { if (!disposed) setStartupError(String(error)); }
+    };
+    window.addEventListener("focus", refreshStatus);
 
     return () => {
+      disposed = true;
+      window.removeEventListener("focus", refreshStatus);
       unlistenLocked.then((unlisten) => unlisten());
+      unlistenQuit.then((unlisten) => unlisten());
     };
   }, []);
 
+  function revokeDashboard() {
+    sessionEpoch.current += 1;
+    setIsAppLocked(true); setSelfLockAuthSuccess(false);
+    setConfig(null); setVaults([]); setApps([]); setActivityLogs([]);
+    setShowRecoveryModal(false); setGeneratedRecoveryKey(null); setRecoveryPin(null);
+    setVaultPinModal(null); setChangePinModalOpen(false);
+    setOldPinInput(""); setNewChangePinInput(""); setConfirmChangePinInput("");
+    setSelfLockPinInput("");
+  }
+
   async function initApp() {
     try {
+      const status = await invoke<SecurityStatus>("security_status");
+      setSecurityStatus(status);
+      if (status.error) { setStartupError(status.error); return; }
       const bio = await invoke<BiometricStatus>("check_biometrics");
       setBiometrics(bio);
 
-      const pinConfigured = await invoke<boolean>("is_pin_configured");
+      const pinConfigured = status.pin_configured;
       setHasPin(pinConfigured);
       if (!pinConfigured) {
         setShowWelcomeSetup(true);
+        setIsAppLocked(false);
+        await loadInstalledApps();
       } else {
-        const isAuth = await invoke<boolean>("is_app_authenticated");
-        if (!isAuth) {
-          setIsAppLocked(true);
-          // Try auto biometric verification if available
-          if (bio.is_available) {
-            setTimeout(() => {
-              handleSelfLockBiometric();
-            }, 250);
-          }
-        }
+        if (status.authenticated && await loadDashboard()) setIsAppLocked(false);
       }
-
-      const cfg = await invoke<AppGuardConfig>("get_config");
-      setConfig(cfg);
-
-      loadInstalledApps();
-      loadVaults();
-      loadActivityLogs();
 
       try {
         const auto = await isEnabled();
@@ -237,63 +279,84 @@ export default function App() {
         console.warn("Autostart check failed:", err);
       }
     } catch (e) {
-      console.error("Failed to initialize AppGuard:", e);
-    }
+      setStartupError(String(e));
+    } finally { setInitialized(true); }
+  }
+
+  async function loadDashboard(epoch = sessionEpoch.current): Promise<boolean> {
+    const [cfg, list, items, logs] = await Promise.all([
+      invoke<AppGuardConfig>("get_config"), invoke<ScannedApp[]>("get_installed_apps"),
+      invoke<VaultItem[]>("inspect_folder_vaults"), invoke<AuditEvent[]>("get_activity_log"),
+    ]);
+    if (epoch !== sessionEpoch.current) return false;
+    setConfig(cfg); setApps(list); setVaults(items); setActivityLogs(logs);
+    return true;
   }
 
   async function loadActivityLogs() {
+    const epoch = sessionEpoch.current;
     try {
       const logs = await invoke<AuditEvent[]>("get_activity_log");
-      setActivityLogs(logs);
+      if (epoch === sessionEpoch.current) setActivityLogs(logs);
     } catch (e) {
       console.error("Failed to load activity logs:", e);
     }
   }
 
   async function handleGenerateRecoveryKey() {
+    if (recoveryPin === null) { setRecoveryPin(""); setRecoveryGenerateError(null); return; }
+    if (working) return;
+    setWorking(true); setRecoveryGenerateError(null);
+    const epoch = sessionEpoch.current;
     try {
-      const key = await invoke<string>("generate_recovery_key");
+      const key = await invoke<string>("generate_recovery_key", { pin: recoveryPin });
+      if (epoch !== sessionEpoch.current) return;
+      setRecoveryPin(null);
       setGeneratedRecoveryKey(key);
       setShowRecoveryModal(true);
-      const cfg = await invoke<AppGuardConfig>("get_config");
-      setConfig(cfg);
-      loadActivityLogs();
+      await loadDashboard(epoch);
     } catch (e: any) {
-      alert("Failed to generate recovery key: " + String(e));
-    }
+      setRecoveryGenerateError(String(e));
+    } finally { setWorking(false); }
   }
 
   async function handleRecoverAccount(e: React.FormEvent) {
     e.preventDefault();
     setRecoverError(null);
     if (!recoverKeyInput || !recoverNewPinInput) return;
-    if (recoverNewPinInput.length < 4) {
-      setRecoverError("New PIN must be at least 4 digits");
+    if (!/^[0-9]{4,8}$/.test(recoverNewPinInput)) {
+      setRecoverError("New PIN must contain 4 to 8 digits");
       return;
     }
 
+    if (authenticating.current) return;
+    authenticating.current = true;
+    setAuthBusy(true);
+    const epoch = sessionEpoch.current;
     try {
       await invoke("verify_recovery_key", {
         key: recoverKeyInput,
         newPin: recoverNewPinInput,
       });
+      if (!await loadDashboard(epoch)) return;
       setShowRecoverAccountModal(false);
       setIsAppLocked(false);
       setHasPin(true);
       setRecoverKeyInput("");
       setRecoverNewPinInput("");
-      loadActivityLogs();
     } catch (err: any) {
       setRecoverError(String(err) || "Invalid recovery key");
-    }
+    } finally { authenticating.current = false; setAuthBusy(false); }
   }
 
   async function loadVaults() {
+    const epoch = sessionEpoch.current;
     setLoadingVaults(true);
     try {
       const items = await invoke<VaultItem[]>("inspect_folder_vaults");
-      setVaults(items);
+      if (epoch === sessionEpoch.current) setVaults(items);
     } catch (e) {
+      setOperationError(String(e));
       console.error("Failed to load vaults:", e);
     } finally {
       setLoadingVaults(false);
@@ -326,6 +389,7 @@ export default function App() {
         loadVaults();
       }
     } catch (e) {
+      setOperationError(String(e));
       console.error("Folder selection failed:", e);
     }
   }
@@ -335,6 +399,7 @@ export default function App() {
       await invoke("remove_folder_from_vault", { folderPath });
       loadVaults();
     } catch (e) {
+      setOperationError(String(e));
       console.error("Failed to remove vault folder:", e);
     }
   }
@@ -355,7 +420,7 @@ export default function App() {
 
   async function handleVaultPinSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!vaultPinModal || !vaultPinModal.pin) return;
+    if (!vaultPinModal || !vaultPinModal.pin || vaultActionLoading) return;
 
     const { item, action, pin } = vaultPinModal;
     setVaultActionLoading(item.path);
@@ -369,17 +434,20 @@ export default function App() {
       loadVaults();
     } catch (err: any) {
       setVaultPinModal((prev) => prev ? { ...prev, error: String(err) } : null);
+      await loadVaults();
     } finally {
       setVaultActionLoading(null);
     }
   }
 
   async function loadInstalledApps() {
+    const epoch = sessionEpoch.current;
     setLoadingApps(true);
     try {
       const list = await invoke<ScannedApp[]>("get_installed_apps");
-      setApps(list);
+      if (epoch === sessionEpoch.current) setApps(list);
     } catch (e) {
+      setOperationError(String(e));
       console.error("Error loading apps:", e);
     } finally {
       setLoadingApps(false);
@@ -387,6 +455,9 @@ export default function App() {
   }
 
   async function handleToggleApp(app: ScannedApp) {
+    if (working) return;
+    setWorking(true); setOperationError(null);
+    const epoch = sessionEpoch.current;
     try {
       const isCurrentlyLocked = !!config?.locked_apps[app.bundle_id]?.is_locked;
       const rule: AppRule = {
@@ -394,17 +465,41 @@ export default function App() {
         name: app.name,
         path: app.path,
         is_locked: !isCurrentlyLocked,
+        exec_path: app.exec_path,
+        startup_wm_class: app.startup_wm_class,
       };
 
       await invoke("toggle_lock_app", { app: rule });
       const updatedConfig = await invoke<AppGuardConfig>("get_config");
-      setConfig(updatedConfig);
+      if (epoch === sessionEpoch.current) setConfig(updatedConfig);
     } catch (e) {
+      setOperationError(String(e));
       console.error("Failed to toggle app lock:", e);
+    } finally { setWorking(false); }
+  }
+
+  async function handleAddCustomApp() {
+    try {
+      const selected = await open({
+        multiple: false,
+        title: "Select Application or Binary to Shield",
+      });
+      if (selected && typeof selected === "string") {
+        await invoke("register_application", { path: selected });
+        await loadDashboard();
+      }
+    } catch (err) {
+      setOperationError(String(err));
+      console.error("Failed to add custom app:", err);
     }
   }
 
   async function handleSelfLockBiometric() {
+    if (authenticating.current) return;
+    authenticating.current = true;
+    setAuthBusy(true);
+    const epoch = sessionEpoch.current;
+    setSelfLockPinError(null);
     try {
       const authLabel = biometrics?.biometric_type === "SystemPassword"
         ? "Authenticate with macOS Password to open AppGuard"
@@ -413,34 +508,31 @@ export default function App() {
       const success = await invoke<boolean>("authenticate_biometrics", {
         reason: authLabel,
       });
-      if (success) {
-        await invoke("unlock_appguard");
-        setSelfLockAuthSuccess(true);
-        setTimeout(() => {
-          setIsAppLocked(false);
-          setSelfLockAuthSuccess(false);
-        }, 500);
+      if (success && await loadDashboard(epoch)) {
+        setIsAppLocked(false);
       }
     } catch (e: any) {
       console.error("Self-lock biometric failed:", e);
       setSelfLockPinError(String(e) || "Biometric authentication failed");
-    }
+    } finally { authenticating.current = false; setAuthBusy(false); }
   }
 
   async function handleSelfLockPinSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!selfLockPinInput) return;
+    if (!selfLockPinInput || authenticating.current) return;
+    authenticating.current = true;
+    setAuthBusy(true);
+    const epoch = sessionEpoch.current;
 
     try {
       const valid = await invoke<boolean>("verify_pin", { pin: selfLockPinInput });
       if (valid) {
-        setSelfLockAuthSuccess(true);
-        setTimeout(() => {
+        if (await loadDashboard(epoch)) {
           setIsAppLocked(false);
           setSelfLockAuthSuccess(false);
           setSelfLockPinInput("");
           setSelfLockPinError(null);
-        }, 500);
+        }
       } else {
         setSelfLockPinError("Incorrect master PIN");
         setSelfLockPinInput("");
@@ -448,14 +540,14 @@ export default function App() {
     } catch (err: any) {
       setSelfLockPinError(String(err) || "Incorrect master PIN");
       setSelfLockPinInput("");
-    }
+    } finally { authenticating.current = false; setAuthBusy(false); }
   }
 
   async function handleSavePin(e: React.FormEvent) {
     e.preventDefault();
     setPinSetupError("");
-    if (newPin.length < 4) {
-      setPinSetupError("PIN must be at least 4 digits");
+    if (!/^[0-9]{4,8}$/.test(newPin)) {
+      setPinSetupError("PIN must contain 4 to 8 digits");
       return;
     }
     if (newPin !== confirmPin) {
@@ -475,9 +567,10 @@ export default function App() {
   }
 
   async function handleFinishWizard() {
+    if (working) return;
     setWizardError("");
-    if (wizardPin.length < 4) {
-      setWizardError("PIN must be at least 4 digits");
+    if (!/^[0-9]{4,8}$/.test(wizardPin)) {
+      setWizardError("PIN must contain 4 to 8 digits");
       return;
     }
     if (wizardPin !== wizardConfirmPin) {
@@ -485,10 +578,11 @@ export default function App() {
       return;
     }
 
+    setWorking(true);
     try {
-      await invoke("set_master_pin", { pin: wizardPin });
+      // A retry after an app-rule failure must not replace the configured PIN.
+      if (!hasPin) await invoke("set_master_pin", { pin: wizardPin });
       setHasPin(true);
-      await invoke("unlock_appguard");
 
       // Lock all selected apps from step 3
       for (const bundleId of wizardSelectedBundles) {
@@ -500,6 +594,8 @@ export default function App() {
               name: matching.name,
               path: matching.path,
               is_locked: true,
+              exec_path: matching.exec_path,
+              startup_wm_class: matching.startup_wm_class,
             },
           });
         }
@@ -509,18 +605,20 @@ export default function App() {
       setConfig(updatedConfig);
       setShowWelcomeSetup(false);
       setIsAppLocked(false);
+      setWizardPin(""); setWizardConfirmPin("");
+      await loadDashboard();
     } catch (err: any) {
       setWizardError(String(err));
-    }
+    } finally { setWorking(false); }
   }
 
   async function handleUpdatePreference<K extends keyof AppGuardConfig>(
     key: K,
     value: AppGuardConfig[K]
   ) {
-    if (!config) return;
+    if (!config || working) return;
+    setWorking(true); setOperationError(null);
     const nextConfig = { ...config, [key]: value };
-    setConfig(nextConfig);
 
     try {
       await invoke("update_preferences", {
@@ -532,11 +630,13 @@ export default function App() {
         stealthMode: nextConfig.stealth_mode,
         tamperProtectionEnabled: !!nextConfig.tamper_protection_enabled,
       });
+      setConfig(await invoke<AppGuardConfig>("get_config"));
       setSettingsSaveFeedback(true);
       setTimeout(() => setSettingsSaveFeedback(false), 1500);
     } catch (err) {
+      setOperationError(String(err));
       console.error("Failed to update preferences:", err);
-    }
+    } finally { setWorking(false); }
   }
 
   async function handleToggleTamperProtection() {
@@ -556,8 +656,8 @@ export default function App() {
   async function handleChangeMasterPin(e: React.FormEvent) {
     e.preventDefault();
     setChangePinError("");
-    if (newChangePinInput.length < 4) {
-      setChangePinError("New PIN must be at least 4 digits");
+    if (!/^[0-9]{4,8}$/.test(newChangePinInput)) {
+      setChangePinError("New PIN must contain 4 to 8 digits");
       return;
     }
     if (newChangePinInput !== confirmChangePinInput) {
@@ -596,6 +696,13 @@ export default function App() {
 
   const lockedCount = Object.values(config?.locked_apps || {}).filter((a) => a.is_locked).length;
 
+  if (!initialized || startupError) return (
+    <main role="status" className="h-screen p-8 flex flex-col justify-center gap-4" style={{ backgroundColor: theme.colors.bgApp, color: theme.colors.textPrimary }}>
+      <h1 className="text-xl font-bold">{startupError ? "AppGuard needs attention" : "Loading AppGuard…"}</h1>
+      {startupError && <><p role="alert">{startupError}</p><p>Protection is unavailable until this configuration problem is resolved. Existing files have been retained.</p></>}
+    </main>
+  );
+
   return (
     <div
       className="flex h-screen w-screen select-none overflow-hidden font-sans transition-colors duration-200"
@@ -606,6 +713,7 @@ export default function App() {
     >
       {/* Sidebar */}
       <aside
+        inert={isAppLocked || showWelcomeSetup || recoveryPin !== null || quitRequested}
         className="w-64 border-r flex flex-col justify-between transition-colors duration-200"
         style={{
           backgroundColor: theme.colors.bgSidebar,
@@ -789,7 +897,7 @@ export default function App() {
       </aside>
 
       {/* Main Content Area */}
-      <main className="flex-1 flex flex-col overflow-hidden">
+      <main inert={isAppLocked || showWelcomeSetup || recoveryPin !== null || quitRequested} className="flex-1 min-w-0 flex flex-col overflow-hidden">
         {/* Top Header */}
         <header
           className="h-16 border-b px-6 flex items-center justify-between transition-colors duration-200"
@@ -829,6 +937,18 @@ export default function App() {
               </div>
 
               <button
+                onClick={handleAddCustomApp}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold shadow-xs cursor-pointer text-white transition-opacity hover:opacity-90"
+                style={{
+                  backgroundColor: theme.colors.accent,
+                }}
+                title="Protect custom binary or application"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>Add App</span>
+              </button>
+
+              <button
                 onClick={loadInstalledApps}
                 disabled={loadingApps}
                 className="p-2 rounded-lg border transition-all cursor-pointer hover:opacity-80"
@@ -847,6 +967,8 @@ export default function App() {
 
         {/* Tab Body */}
         <section className="flex-1 overflow-y-auto p-6">
+          {operationError && <p role="alert" className="p-3 mb-4 rounded-lg bg-red-500/10 text-red-500 break-words">{operationError}</p>}
+          {activeTab === "apps" && <p role="status" className="text-xs mb-4" style={{ color: theme.colors.textSecondary }}>{securityStatus?.protection.message}</p>}
           {/* TAB 1: APPS */}
           {activeTab === "apps" && (
             <div className="space-y-5">
@@ -872,13 +994,13 @@ export default function App() {
                     <h3 className="text-sm font-bold flex items-center gap-2" style={{ color: theme.colors.textPrimary }}>
                       System Privacy Status
                       <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold uppercase tracking-wider bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
-                        Active Shield
+                        {securityStatus?.protection.available ? "Window Shielding" : "Shield Unavailable"}
                       </span>
                     </h3>
                     <p className="text-xs" style={{ color: theme.colors.textSecondary }}>
                       {lockedCount === 0
                         ? "No apps shielded yet. Select apps below to guard against unauthorized access."
-                        : `${lockedCount} app${lockedCount > 1 ? "s" : ""} protected with hardware biometrics and instant window shield.`}
+                        : `${lockedCount} app${lockedCount > 1 ? "s" : ""} protected with authenticated window shielding.`}
                     </p>
                   </div>
                 </div>
@@ -1015,6 +1137,9 @@ export default function App() {
 
                         <button
                           onClick={() => handleToggleApp(app)}
+                          disabled={working || (!isLocked && !securityStatus?.protection.available)}
+                          aria-label={`${isLocked ? "Remove protection from" : "Protect"} ${app.name}`}
+                          aria-pressed={isLocked}
                           className="relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none"
                           style={{
                             backgroundColor: isLocked ? theme.colors.toggleActive : theme.colors.toggleInactive,
@@ -1046,7 +1171,7 @@ export default function App() {
                     </span>
                   </h3>
                   <p className="text-xs" style={{ color: theme.colors.textSecondary }}>
-                    Folders secured with local AES-256-GCM authenticated encryption. Shielded from Finder exploration when locked.
+                    Encrypt file contents locally with AES-256-GCM. Names and folder structure remain visible.
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
@@ -1089,7 +1214,7 @@ export default function App() {
                       No Protected Folders Yet
                     </h4>
                     <p className="text-xs max-w-sm mt-1" style={{ color: theme.colors.textMuted }}>
-                      Click "Protect New Folder" to select any directory on your Mac (such as Documents, Financials, or Taxes) and encrypt it.
+                      Click "Protect New Folder" to select a directory and encrypt its files.
                     </p>
                   </div>
                 </div>
@@ -1137,7 +1262,7 @@ export default function App() {
                                       : "bg-emerald-500/10 text-emerald-500 border border-emerald-500/20"
                                   }`}
                                 >
-                                  {vault.is_locked ? "Encrypted & Hidden" : "Open"}
+                                  {vault.status === "partial" ? "Needs Recovery" : vault.status === "unavailable" ? "Unavailable" : vault.is_locked ? "Encrypted" : "Open"}
                                 </span>
                               </div>
                               <p className="text-[11px] truncate font-mono mt-0.5" style={{ color: theme.colors.textMuted }} title={vault.path}>
@@ -1155,6 +1280,8 @@ export default function App() {
                           </button>
                         </div>
 
+                        {vault.error && <p role="alert" className="text-xs text-red-500 break-words">{vault.error}</p>}
+                        <p className="text-xs" style={{ color: theme.colors.textSecondary }}>{vault.recovery_enabled ? "Recovery key enrolled" : "Generate a recovery key after encryption to enroll this vault."}</p>
                         <div className="flex items-center justify-between text-xs pt-3 border-t" style={{ borderColor: theme.colors.border }}>
                           <div className="flex items-center gap-3 font-medium" style={{ color: theme.colors.textSecondary }}>
                             <span>{vault.file_count} files</span>
@@ -1457,19 +1584,20 @@ export default function App() {
                         Require Authentication to Open AppGuard
                       </span>
                       <p className="text-[11px]" style={{ color: theme.colors.textSecondary }}>
-                        Prompts for Touch ID, macOS Password, or Master PIN when opening the app.
+                        Always enabled. Use your Master PIN or available system authentication.
                       </p>
                     </div>
                     <button
-                      onClick={() => handleUpdatePreference("app_self_locked", !config?.app_self_locked)}
+                      disabled
+                      aria-label="Dashboard authentication is always required"
                       className="relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none"
                       style={{
-                        backgroundColor: config?.app_self_locked ? theme.colors.toggleActive : theme.colors.toggleInactive,
+                        backgroundColor: theme.colors.toggleActive,
                       }}
                     >
                       <span
                         className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
-                          config?.app_self_locked ? "translate-x-5" : "translate-x-0"
+                          "translate-x-5"
                         }`}
                       />
                     </button>
@@ -1478,10 +1606,10 @@ export default function App() {
                   <div className="flex items-center justify-between py-2 border-t" style={{ borderColor: theme.colors.borderCard }}>
                     <div>
                       <span className="text-xs font-semibold" style={{ color: theme.colors.textPrimary }}>
-                        Instant Process Re-lock (Zero Tolerance)
+                        Re-lock on Focus Change
                       </span>
                       <p className="text-[11px]" style={{ color: theme.colors.textSecondary }}>
-                        Re-locks protected apps the exact millisecond you switch windows (overrides grace period).
+                        Re-locks when polling detects a focus change. Explicit timed unlocks still expire at their selected deadline.
                       </p>
                     </div>
                     <button
@@ -1513,7 +1641,7 @@ export default function App() {
                         </span>
                       </div>
                       <p className="text-[11px]" style={{ color: theme.colors.textSecondary }}>
-                        Registers OS supervisor (launchd / Windows Task Scheduler / systemd) to immediately resurrect AppGuard if an intruder forces kill via killall, Task Manager, or SIGKILL.
+                        Registers an OS startup/restart service. Behavior varies by platform; a user with system access can stop or remove it.
                       </p>
                     </div>
                     <button
@@ -1597,14 +1725,14 @@ export default function App() {
                   <div className="flex items-center justify-between py-1">
                     <div>
                       <span className="text-xs font-semibold" style={{ color: theme.colors.textPrimary }}>
-                        Lock All Apps when Mac Goes to Sleep
+                         Lock All Apps on Sleep (platform support pending)
                       </span>
                       <p className="text-[11px]" style={{ color: theme.colors.textSecondary }}>
-                        Instantly clears all active unlock sessions upon system sleep.
+                         Sleep/session-lock event integration is not enabled in this build.
                       </p>
                     </div>
                     <button
-                      onClick={() => handleUpdatePreference("lock_on_sleep", !config?.lock_on_sleep)}
+                       disabled
                       className="relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none"
                       style={{
                         backgroundColor: config?.lock_on_sleep ? theme.colors.toggleActive : theme.colors.toggleInactive,
@@ -1621,14 +1749,14 @@ export default function App() {
                   <div className="flex items-center justify-between py-1 border-t" style={{ borderColor: theme.colors.borderCard }}>
                     <div>
                       <span className="text-xs font-semibold" style={{ color: theme.colors.textPrimary }}>
-                        Lock All Apps on Screensaver / Display Lock
+                         Lock All Apps on Screensaver (platform support pending)
                       </span>
                       <p className="text-[11px]" style={{ color: theme.colors.textSecondary }}>
-                        Requires re-authentication whenever your screen turns off.
+                         Screensaver/display-lock event integration is not enabled in this build.
                       </p>
                     </div>
                     <button
-                      onClick={() => handleUpdatePreference("lock_on_screensaver", !config?.lock_on_screensaver)}
+                       disabled
                       className="relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none"
                       style={{
                         backgroundColor: config?.lock_on_screensaver ? theme.colors.toggleActive : theme.colors.toggleInactive,
@@ -1665,7 +1793,7 @@ export default function App() {
                         Master Recovery PIN
                       </h4>
                       <p className="text-xs" style={{ color: theme.colors.textSecondary }}>
-                        Your primary fallback secret for unlocking applications and encrypting vaults.
+                         Your primary fallback secret for unlocking applications and encrypting vaults.
                       </p>
                     </div>
                   </div>
@@ -1777,8 +1905,8 @@ export default function App() {
                       </h5>
                     </div>
                     <ul className="text-[11px] space-y-1 list-disc pl-4" style={{ color: theme.colors.textSecondary }}>
-                      <li><strong>Shoulder Surfers & Casual Snooping:</strong> Frontmost application detection automatically hides windows and enforces biometric verification.</li>
-                      <li><strong>At-Rest File Inspection:</strong> Vaults use authenticated AES-256-GCM encryption with unique per-file nonces and Argon2id key derivation.</li>
+                      <li><strong>Casual Snooping:</strong> Best-effort polling hides protected windows after detection and prompts for a Master PIN or available system authentication. Frames can be visible before detection.</li>
+                       <li><strong>At-Rest File Inspection:</strong> Vaults use chunked authenticated AES-256-GCM encryption, random vault keys, and Argon2id key wrapping.</li>
                       <li><strong>Force Quit Attempts:</strong> OS-level supervisor daemon (launchd/Task Scheduler/systemd) resurrects background guard if process is killed.</li>
                     </ul>
                   </div>
@@ -1799,7 +1927,7 @@ export default function App() {
                     <ul className="text-[11px] space-y-1 list-disc pl-4" style={{ color: theme.colors.textSecondary }}>
                       <li><strong>Userland Security Barrier:</strong> AppGuard runs with user privileges to control GUI focus and file encryption without requiring root/kernel extensions.</li>
                       <li><strong>Physical / Root Terminal Access:</strong> Intruders with local root or debug privileges can inspect unencrypted process memory while an app is active.</li>
-                      <li><strong>Local Authenticated Encryption:</strong> Zero cloud telemetry or external servers. All cryptographic keys are derived locally in memory.</li>
+                      <li><strong>Local Encryption:</strong> Vault keys and credentials are processed locally. Update checks contact the GitHub Releases API; downloads are installed manually.</li>
                     </ul>
                   </div>
                 </div>
@@ -1827,11 +1955,11 @@ export default function App() {
                           Emergency Recovery Key
                         </h4>
                         <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-500 border border-emerald-500/20">
-                          {config?.recovery_key_hash ? "Enrolled" : "Not Generated"}
+                          {config?.recovery_key_configured ? "Enrolled" : "Not Generated"}
                         </span>
                       </div>
                       <p className="text-xs" style={{ color: theme.colors.textSecondary }}>
-                        One-time cryptographic key to restore your vault and PIN if you forget your Master PIN.
+                         One-time cryptographic key to restore your PIN and rewrap supported vault keys if you forget your Master PIN.
                       </p>
                     </div>
                   </div>
@@ -1845,7 +1973,7 @@ export default function App() {
                       color: theme.colors.accent,
                     }}
                   >
-                    {config?.recovery_key_hash ? "Regenerate Key" : "Generate Key"}
+                    {config?.recovery_key_configured ? "Regenerate Key" : "Generate Key"}
                   </button>
                 </div>
               </div>
@@ -2064,7 +2192,6 @@ export default function App() {
               <div>
                 <input
                   type="password"
-                  maxLength={8}
                   placeholder="Enter Master PIN"
                   value={vaultPinModal.pin}
                   onChange={(e) =>
@@ -2201,7 +2328,7 @@ export default function App() {
                       ? "Hardware sensor detected. You can instantly unlock protected apps with your fingerprint."
                       : biometrics?.biometric_type === "SystemPassword"
                       ? "No dedicated fingerprint scanner detected. AppGuard will seamlessly use your macOS system login password and Master PIN."
-                      : "No biometrics available. AppGuard will secure all applications and vaults using your Master PIN."}
+                      : "Use your Master PIN for vaults and application shielding where platform support is available."}
                   </p>
                 </div>
 
@@ -2332,32 +2459,64 @@ export default function App() {
                     borderColor: theme.colors.borderCard,
                   }}
                 >
-                  {apps
-                    .filter((a) =>
-                      [
-                        "com.apple.Notes",
-                        "com.apple.MobileSMS",
-                        "com.apple.Photos",
-                        "com.apple.Terminal",
-                        "com.apple.Safari",
-                        "com.apple.mail",
-                        "com.google.Chrome",
-                      ].includes(a.bundle_id)
-                    )
-                    .map((app) => {
+                  {(() => {
+                    // Match popular apps across macOS, Linux, and Windows
+                    const popularAppIds = [
+                      "com.apple.Notes",
+                      "com.apple.MobileSMS",
+                      "com.apple.Photos",
+                      "com.apple.Terminal",
+                      "com.apple.Safari",
+                      "com.apple.mail",
+                      "com.google.Chrome",
+                      "google-chrome",
+                      "firefox",
+                      "firefox-esr",
+                      "org.mozilla.firefox",
+                      "org.mozilla.Thunderbird",
+                      "thunderbird",
+                      "wireshark",
+                      "burpsuite",
+                      "nmap",
+                      "zenmap",
+                      "kali-terminal",
+                      "org.gnome.Terminal",
+                      "xfce4-terminal",
+                      "konsole",
+                      "terminator",
+                      "qterminal",
+                      "code",
+                      "vscodium",
+                      "sublime_text",
+                      "discord",
+                      "telegramdesktop",
+                      "slack",
+                    ];
+                    let suggested = apps.filter(
+                      (a) =>
+                        popularAppIds.includes(a.bundle_id) ||
+                        popularAppIds.some((id) =>
+                          a.bundle_id.toLowerCase().includes(id.toLowerCase())
+                        )
+                    );
+                    // If no predefined popular apps matched, display first 10 indexed apps
+                    if (suggested.length === 0) {
+                      suggested = apps.slice(0, 12);
+                    }
+
+                    if (suggested.length === 0) {
+                      return (
+                        <div className="py-6 text-center text-xs" style={{ color: theme.colors.textMuted }}>
+                          No applications detected yet. You can add apps anytime from the dashboard.
+                        </div>
+                      );
+                    }
+
+                    return suggested.map((app) => {
                       const isSelected = wizardSelectedBundles.has(app.bundle_id);
                       return (
-                        <div
+                        <label
                           key={app.bundle_id}
-                          onClick={() => {
-                            const next = new Set(wizardSelectedBundles);
-                            if (isSelected) {
-                              next.delete(app.bundle_id);
-                            } else {
-                              next.add(app.bundle_id);
-                            }
-                            setWizardSelectedBundles(next);
-                          }}
                           className="flex items-center justify-between p-2.5 rounded-lg cursor-pointer transition-all border"
                           style={{
                             backgroundColor: isSelected
@@ -2387,12 +2546,18 @@ export default function App() {
                           <input
                             type="checkbox"
                             checked={isSelected}
-                            readOnly
+                            disabled={!securityStatus?.protection.available || working}
+                            onChange={() => setWizardSelectedBundles((current) => {
+                              const next = new Set(current);
+                              if (next.has(app.bundle_id)) next.delete(app.bundle_id); else next.add(app.bundle_id);
+                              return next;
+                            })}
                             className="rounded accent-emerald-500 cursor-pointer"
                           />
-                        </div>
+                        </label>
                       );
-                    })}
+                    });
+                  })()}
                 </div>
 
                 {wizardError && (
@@ -2412,13 +2577,14 @@ export default function App() {
                   </button>
                   <button
                     onClick={handleFinishWizard}
+                    disabled={working}
                     className="flex-1 py-3 px-4 rounded-xl font-semibold text-xs shadow-md cursor-pointer text-white"
                     style={{
                       backgroundColor: theme.colors.accent,
                       boxShadow: `0 8px 16px ${theme.colors.accentGlow}`,
                     }}
                   >
-                    Finish Setup & Activate Shield
+                    {working ? "Saving…" : "Finish Setup"}
                   </button>
                 </div>
               </div>
@@ -2430,6 +2596,10 @@ export default function App() {
       {/* AppGuard Self-Lock Gate (Prevents unauthorized access to AppGuard itself) */}
       {isAppLocked && !showWelcomeSetup && (
         <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Unlock AppGuard"
+          inert={showRecoverAccountModal}
           className="fixed inset-0 z-50 backdrop-blur-2xl flex items-center justify-center p-4 transition-all"
           style={{ backgroundColor: theme.colors.bgOverlay }}
         >
@@ -2466,6 +2636,7 @@ export default function App() {
             {biometrics?.is_available && (
               <button
                 onClick={handleSelfLockBiometric}
+                disabled={authBusy}
                 className="w-full py-3 px-4 rounded-xl font-semibold text-sm flex items-center justify-center gap-2 transition-all shadow-md cursor-pointer hover:opacity-95"
                 style={{
                   backgroundColor: theme.colors.accent,
@@ -2497,7 +2668,9 @@ export default function App() {
             <form onSubmit={handleSelfLockPinSubmit} className="w-full space-y-3">
               <input
                 type="password"
-                maxLength={8}
+                aria-label="Master PIN"
+                autoComplete="current-password"
+                disabled={authBusy}
                 placeholder="••••"
                 value={selfLockPinInput}
                 onChange={(e) => {
@@ -2513,7 +2686,7 @@ export default function App() {
                 autoFocus
               />
               {selfLockPinError && (
-                <p className="text-xs text-red-500 font-medium text-center">{selfLockPinError}</p>
+                <p role="alert" className="text-xs text-red-500 font-medium text-center">{selfLockPinError}</p>
               )}
               <button
                 type="submit"
@@ -2523,7 +2696,7 @@ export default function App() {
                   boxShadow: `0 8px 16px ${theme.colors.accentGlow}`,
                 }}
               >
-                Unlock AppGuard
+                {authBusy ? "Verifying…" : "Unlock AppGuard"}
               </button>
 
               <button
@@ -2544,7 +2717,7 @@ export default function App() {
         </div>
       )}
       {/* Change Master PIN Modal */}
-      {changePinModalOpen && (
+      {changePinModalOpen && !isAppLocked && (
         <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xl flex items-center justify-center p-4">
           <div
             className="w-full max-w-md rounded-2xl border p-8 shadow-2xl space-y-6"
@@ -2578,7 +2751,6 @@ export default function App() {
                 </label>
                 <input
                   type="password"
-                  maxLength={8}
                   placeholder="••••"
                   value={oldPinInput}
                   onChange={(e) => {
@@ -2870,12 +3042,26 @@ export default function App() {
       )}
 
       {/* Auto-Updater Notification Modal */}
-      {updaterState.status === "available" && (
+      {quitRequested && !isAppLocked && <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ backgroundColor: theme.colors.bgOverlay }}><section role="dialog" aria-modal="true" aria-label="Quit AppGuard" className="max-w-md p-6 rounded-xl border space-y-4" style={{ backgroundColor: theme.colors.bgModal, borderColor: theme.colors.border }}><h2 className="font-bold">Quit AppGuard?</h2><p>Window shielding will stop. Encrypted vault files remain encrypted. Any configured restart service will be disabled.</p>{operationError && <p role="alert">{operationError}</p>}<div className="flex gap-3"><button autoFocus onClick={() => setQuitRequested(false)} className="p-3 border rounded">Keep running</button><button onClick={() => { void invoke("quit_app").catch((error) => setOperationError(String(error))); }} className="p-3 rounded" style={{ backgroundColor: theme.colors.accent, color: theme.colors.accentText }}>Quit AppGuard</button></div></section></div>}
+      {recoveryPin !== null && !isAppLocked && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ backgroundColor: theme.colors.bgOverlay }}>
+          <form role="dialog" aria-modal="true" aria-label="Generate recovery key" onSubmit={(event) => { event.preventDefault(); void handleGenerateRecoveryKey(); }} className="w-full max-w-md p-6 rounded-xl border space-y-4" style={{ backgroundColor: theme.colors.bgModal, borderColor: theme.colors.border }}>
+            <label htmlFor="recovery-pin" className="block font-semibold">Master PIN for recovery enrollment</label>
+            <input id="recovery-pin" autoFocus type="password" autoComplete="current-password" disabled={working} value={recoveryPin} onChange={(event) => setRecoveryPin(event.target.value)} className="block w-full p-2 border rounded" style={{ backgroundColor: theme.colors.bgInput, borderColor: theme.colors.border }} />
+            <p className="text-sm" style={{ color: theme.colors.textSecondary }}>Enrolls currently encrypted vaults and replaces the previous recovery key. Regenerate after encrypting additional vaults.</p>
+            {recoveryGenerateError && <p role="alert" className="text-sm text-red-500">{recoveryGenerateError}</p>}
+            <div className="flex gap-3"><button disabled={working} type="button" onClick={() => setRecoveryPin(null)} className="flex-1 p-3 border rounded">Cancel</button><button disabled={working || !recoveryPin} className="flex-1 p-3 rounded disabled:opacity-50" style={{ backgroundColor: theme.colors.accent, color: theme.colors.accentText }}>{working ? "Generating…" : "Generate key"}</button></div>
+          </form>
+        </div>
+      )}
+      {updaterState.status === "available" && !isAppLocked && !showWelcomeSetup && recoveryPin === null && !quitRequested && (
         <UpdateModal
           info={updaterState.info}
           onDismiss={dismissUpdater}
           onDownloadUrl={openDownload}
           theme={theme}
+          platform={securityStatus?.platform ?? "unknown"}
+          arch={securityStatus?.arch ?? "unknown"}
         />
       )}
     </div>

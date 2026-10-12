@@ -4,7 +4,7 @@ import { getVersion } from "@tauri-apps/api/app";
 
 const GITHUB_REPO = "novitaswebworks/appguard";
 const LATEST_RELEASE_API = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`;
-const FALLBACK_VERSION = "0.7.0";
+const FALLBACK_VERSION = "0.8.0-beta.1";
 const LAST_CHECK_KEY = "appguard:updater:last_check";
 const CHECK_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 
@@ -47,14 +47,15 @@ export function isNewer(remote: string, current: string): boolean {
     const y = b[i] ?? 0;
     if (x !== y) return x > y;
   }
-  return false;
+  return current.includes("-") && !remote.includes("-");
 }
 
-export function detectUserPlatform(): "macos" | "windows" | "linux" {
-  const ua = navigator.userAgent.toLowerCase();
-  if (ua.includes("mac")) return "macos";
-  if (ua.includes("win")) return "windows";
-  return "linux";
+export function isReleaseUrl(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.hostname === "github.com" && !url.username && !url.password && !url.port && url.pathname.startsWith(`/${GITHUB_REPO}/releases/`);
+  } catch { return false; }
 }
 
 export function useUpdater() {
@@ -92,11 +93,14 @@ export function useUpdater() {
       localStorage.setItem(LAST_CHECK_KEY, Date.now().toString());
 
       const data = await res.json();
+      if (typeof data.tag_name !== "string" || !/^v?\d+\.\d+\.\d+$/.test(data.tag_name) || data.draft || data.prerelease) {
+        throw new Error("Unexpected release metadata from GitHub");
+      }
       const remoteVersion = (data.tag_name || "").replace(/^v/, "");
 
       if (isNewer(remoteVersion, appVer)) {
         const assets: ReleaseAsset[] = Array.isArray(data.assets)
-          ? data.assets.map((a: any) => ({
+          ? data.assets.filter((a: any) => typeof a?.name === "string" && isReleaseUrl(a.browser_download_url) && Number.isFinite(a.size)).map((a: any) => ({
               name: a.name,
               browser_download_url: a.browser_download_url,
               size: a.size,
@@ -108,8 +112,8 @@ export function useUpdater() {
           info: {
             version: remoteVersion,
             currentVersion: appVer,
-            releaseNotes: data.body || "A new version of AppGuard is available.",
-            releaseUrl: data.html_url || `https://github.com/${GITHUB_REPO}/releases/latest`,
+            releaseNotes: typeof data.body === "string" ? data.body : "A new version of AppGuard is available.",
+            releaseUrl: isReleaseUrl(data.html_url) ? data.html_url : `https://github.com/${GITHUB_REPO}/releases/latest`,
             publishedAt: data.published_at || new Date().toISOString(),
             assets,
           },
@@ -131,10 +135,14 @@ export function useUpdater() {
   }, []);
 
   const openDownload = useCallback(async (url: string) => {
+    if (!isReleaseUrl(url)) {
+      setState({ status: "error", message: "Download URL is not an AppGuard GitHub release" });
+      return;
+    }
     try {
       await openUrl(url);
-    } catch {
-      window.open(url, "_blank");
+    } catch (error) {
+      setState({ status: "error", message: `Could not open release: ${String(error)}` });
     }
   }, []);
 
