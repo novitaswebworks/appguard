@@ -92,7 +92,7 @@ When you launch or switch to a protected app, AppGuard instantly cloaks the targ
 | :--- | :--- | :--- | :--- |
 | **macOS 12+** | Apple Silicon (`arm64`) & Intel (`x86_64`) | Touch ID, Apple Watch, Argon2id PIN | `.dmg` (Universal), Homebrew |
 | **Windows 10 / 11** | 64-bit (`x64`) | Windows Hello (Face / Fingerprint / PIN) | `.exe` (NSIS Installer) |
-| **Linux (X11 & Wayland)** | `x86_64` | Linux PAM, `fprintd`, Argon2id PIN | `.AppImage`, `.deb` |
+| **Linux (X11 & Wayland)** | `x86_64` & `arm64` (aarch64) | Linux PAM, `fprintd`, Argon2id PIN | `.AppImage`, `.deb` |
 
 ---
 
@@ -118,17 +118,27 @@ Download `AppGuard_0.6.0_x64-setup.exe` from [Releases](https://github.com/novit
 
 ---
 
-### Linux
+### Linux (x86_64 & ARM64)
 
 #### AppImage
 ```bash
+# For x86_64:
 chmod +x AppGuard_0.6.0_amd64.AppImage
 ./AppGuard_0.6.0_amd64.AppImage
+
+# For ARM64 (Raspberry Pi 4/5, Asahi Linux, ARM laptops):
+chmod +x AppGuard_0.6.0_aarch64.AppImage
+./AppGuard_0.6.0_aarch64.AppImage
 ```
 
 #### Debian / Ubuntu (.deb)
 ```bash
+# For x86_64:
 sudo dpkg -i AppGuard_0.6.0_amd64.deb
+sudo apt-get install -f
+
+# For ARM64:
+sudo dpkg -i AppGuard_0.6.0_arm64.deb
 sudo apt-get install -f
 ```
 
